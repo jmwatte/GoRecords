@@ -1,0 +1,9 @@
+"We are building a local-first, keyboard-driven music player using Wails v2, Go (GORM), and Svelte. The user's library is organized by folders, which may contain multi-disc box sets and sidecar cover art. I am going to feed you a master plan one checkbox at a time.
+Your Rules:
+Only write the code for the specific checkbox I give you. Do not hallucinate future steps.
+SQLite Limits: In Phase 2, GORM CreateInBatches MUST be capped at 40-50 to avoid the 999 variable limit.
+Wails IPC Limits: In Phase 3, you MUST implement pagination/chunking for album queries so we don't freeze the UI with massive JSON payloads.
+URL Encoding: In Phase 4 and 6, the Go AssetHandler MUST use url.PathUnescape, and the Svelte frontend MUST use encodeURIComponent for the audio src.
+Audio Seeking: The Wails AssetHandler MUST use http.ServeContent to support HTTP Range requests.
+Use log/slog for all Go logging and Svelte stores for frontend state.
+Reply with 'Understood. Waiting for checkbox 1.1.' if you are ready."
