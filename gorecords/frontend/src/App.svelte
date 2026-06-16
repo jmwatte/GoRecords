@@ -4,9 +4,9 @@
   import {
     viewMode, currentIndex, currentView, isVisualMode,
     isAlbumTracksView, toggleViewMode, openAlbum, closeAlbum,
-    activeAlbumFolder
+    activeAlbumFolder, scanProgress
   } from './lib/stores.js';
-  import { GetAlbumTracks, GetRandomAlbum } from '../wailsjs/go/main/App.js';
+  import { GetAlbumTracks, GetRandomAlbum, GetAlbums } from '../wailsjs/go/main/App.js';
   import Settings from './lib/Settings.svelte';
   import FacetSidebar from './lib/FacetSidebar.svelte';
   import Toasts from './lib/Toasts.svelte';
@@ -14,17 +14,10 @@
 
   let cleanup;
 
-  // Album list (fetched from backend — using mock for now until Phase 7)
-  const totalAlbums = 50;
-  const albums = Array.from({ length: totalAlbums }, (_, i) => ({
-    albumFolder: `/mock/music/Album ${i + 1}`,
-    album: `Album Title ${i + 1}`,
-    albumArtist: `Artist ${String.fromCharCode(65 + (i % 26))}`,
-    year: 1990 + (i % 35),
-    genre: i % 3 === 0 ? 'Rock' : i % 3 === 1 ? 'Jazz' : 'Electronic',
-    coverPath: '',
-    trackCount: Math.floor(Math.random() * 15) + 5,
-  }));
+  // Album list — fetched from backend on mount
+  let albums = [];
+  let totalAlbums = 0;
+  let loadingAlbums = true;
 
   // Track list — populated via Wails binding when album is opened
   let tracks = [];
@@ -57,10 +50,33 @@
 
   onMount(() => {
     cleanup = initKeyboard();
+    loadAlbums();
     return () => {
       if (cleanup) cleanup();
     };
   });
+
+  // Fetch albums from the backend
+  async function loadAlbums() {
+    loadingAlbums = true;
+    try {
+      const result = await GetAlbums(0, 1000);
+      albums = result.albums || [];
+      totalAlbums = albums.length;
+    } catch (err) {
+      console.error('Failed to load albums:', err);
+      showToast('Failed to load album library', 'error');
+      albums = [];
+      totalAlbums = 0;
+    } finally {
+      loadingAlbums = false;
+    }
+  }
+
+  // Reload albums when scan completes and we have none
+  $: if (cleanup && $scanProgress === -1 && albums.length === 0) {
+    loadAlbums();
+  }
 
   // Subscribe to keyboard events for navigation
   $: {

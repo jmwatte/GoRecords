@@ -73,6 +73,37 @@ func (a *App) ScanMusic(rootDir string) error {
 	return scanner.FullSync(DB, rootDir, emitter)
 }
 
+// PickFolder opens the native OS directory picker dialog and returns the
+// selected path, or an empty string if the user cancelled.
+func (a *App) PickFolder() string {
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose Music Folder",
+	})
+	if err != nil {
+		slog.Warn("directory picker cancelled or failed", "error", err)
+		return ""
+	}
+	return dir
+}
+
+// GetAlbums returns all unique albums (grouped by album_folder) from the
+// database, with aggregated metadata. Pass an offset and limit for pagination.
+func (a *App) GetAlbums(offset, limit int) *query.PaginatedAlbums {
+	q := query.AlbumQuery{
+		Filters: []query.Filter{},
+		SortBy:  "album",
+		SortDir: query.SortAsc,
+		Offset:  offset,
+		Limit:   limit,
+	}
+	result, err := query.GetAlbumsPaginated(DB, q)
+	if err != nil {
+		slog.Error("failed to get albums", "error", err)
+		return &query.PaginatedAlbums{Albums: []query.AlbumResult{}, Total: 0, Offset: offset, Limit: limit}
+	}
+	return result
+}
+
 // wailsProgressEmitter implements scanner.ProgressEmitter using Wails runtime events.
 type wailsProgressEmitter struct {
 	ctx context.Context

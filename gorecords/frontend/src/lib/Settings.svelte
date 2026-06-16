@@ -1,19 +1,13 @@
 <script>
   import { musicRoot, scanProgress, currentView } from './stores.js';
-  import { ScanMusic } from '../../wailsjs/go/main/App.js';
+  import { ScanMusic, PickFolder } from '../../wailsjs/go/main/App.js';
   import { showToast } from './toastStore.js';
-
-  // Expose the Wails runtime for OpenDirectoryDialog
-  /* global wails */
 
   let loading = false;
 
   async function chooseFolder() {
     try {
-      const dir = await wails.Runtime.OpenDirectoryDialog({
-        DefaultDirectory: $musicRoot || '',
-        Title: 'Choose Music Folder',
-      });
+      const dir = await PickFolder();
       if (dir) {
         $musicRoot = dir;
       }

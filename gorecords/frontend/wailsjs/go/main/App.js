@@ -6,12 +6,20 @@ export function GetAlbumTracks(arg1) {
   return window['go']['main']['App']['GetAlbumTracks'](arg1);
 }
 
+export function GetAlbums(arg1, arg2) {
+  return window['go']['main']['App']['GetAlbums'](arg1, arg2);
+}
+
 export function GetRandomAlbum(arg1) {
   return window['go']['main']['App']['GetRandomAlbum'](arg1);
 }
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function PickFolder() {
+  return window['go']['main']['App']['PickFolder']();
 }
 
 export function ScanMusic(arg1) {
