@@ -31,7 +31,12 @@ func ExtractTags(filePath string) (*models.Track, error) {
 
 	metadata, err := tag.ReadFrom(f)
 	if err != nil {
-		return nil, err
+		// Fallback: try ID3v1-only files
+		f.Seek(0, 0)
+		metadata, err = tag.ReadID3v1Tags(f)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	track := &models.Track{
@@ -46,7 +51,12 @@ func ExtractTags(filePath string) (*models.Track, error) {
 
 	// Track & Disc number
 	if tn, total := metadata.Track(); tn != 0 {
-		track.TrackNumber = tn
+		// Handle files where track is encoded as disc*100 + track (e.g. 101 = disc 1, track 1)
+		if tn > 100 && total > 0 && total < 100 {
+			track.TrackNumber = tn % 100
+		} else {
+			track.TrackNumber = tn
+		}
 		_ = total
 	}
 	if dn, total := metadata.Disc(); dn != 0 {
@@ -126,6 +136,7 @@ func durationFromTags(metadata tag.Metadata) float64 {
 func durationFromDecoder(filePath string) float64 {
 	f, err := os.Open(filePath)
 	if err != nil {
+		slog.Debug("duration decoder: failed to open", "path", filePath, "error", err)
 		return 0
 	}
 	defer f.Close()
@@ -139,18 +150,21 @@ func durationFromDecoder(filePath string) float64 {
 	case ".mp3":
 		s, f, err := mp3.Decode(f)
 		if err != nil {
+			slog.Debug("duration decoder: mp3 decode failed", "path", filePath, "error", err)
 			return 0
 		}
 		streamer, format = s, f
 	case ".flac":
 		s, f, err := flac.Decode(f)
 		if err != nil {
+			slog.Debug("duration decoder: flac decode failed", "path", filePath, "error", err)
 			return 0
 		}
 		streamer, format = s, f
 	case ".wav":
 		s, f, err := wav.Decode(f)
 		if err != nil {
+			slog.Debug("duration decoder: wav decode failed", "path", filePath, "error", err)
 			return 0
 		}
 		streamer, format = s, f
@@ -160,6 +174,7 @@ func durationFromDecoder(filePath string) float64 {
 	defer streamer.Close()
 
 	if format.SampleRate == 0 {
+		slog.Debug("duration decoder: zero sample rate", "path", filePath)
 		return 0
 	}
 
@@ -174,8 +189,10 @@ func toString(v interface{}) string {
 		return val
 	case time.Duration:
 		return strconv.FormatFloat(val.Seconds(), 'f', 0, 64)
+	case fmt.Stringer:
+		return strings.TrimSpace(val.String())
 	default:
-		return strings.TrimSpace(val.(fmt.Stringer).String())
+		return fmt.Sprintf("%v", val)
 	}
 }
 

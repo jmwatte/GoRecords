@@ -11,6 +11,6 @@ export function GetRandomAlbum(arg1:string):Promise<string>;
 
 export function Greet(arg1:string):Promise<string>;
 
-export function PickFolder():Promise<string>;
+export function PickFolder(arg1:string):Promise<string>;
 
 export function ScanMusic(arg1:string):Promise<void>;

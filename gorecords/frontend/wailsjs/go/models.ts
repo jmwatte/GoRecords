@@ -1,19 +1,19 @@
 export namespace models {
 	
 	export class Track {
-	    ID: number;
-	    Path: string;
-	    Title: string;
-	    Artist: string;
-	    AlbumArtist: string;
-	    Album: string;
-	    Genre: string;
-	    Year: number;
-	    TrackNumber: number;
-	    DiscNumber: number;
-	    Duration: number;
-	    CoverPath: string;
-	    AlbumFolder: string;
+	    id: number;
+	    path: string;
+	    title: string;
+	    artist: string;
+	    albumArtist: string;
+	    album: string;
+	    genre: string;
+	    year: number;
+	    trackNumber: number;
+	    discNumber: number;
+	    duration: number;
+	    coverPath: string;
+	    albumFolder: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Track(source);
@@ -21,19 +21,19 @@ export namespace models {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ID = source["ID"];
-	        this.Path = source["Path"];
-	        this.Title = source["Title"];
-	        this.Artist = source["Artist"];
-	        this.AlbumArtist = source["AlbumArtist"];
-	        this.Album = source["Album"];
-	        this.Genre = source["Genre"];
-	        this.Year = source["Year"];
-	        this.TrackNumber = source["TrackNumber"];
-	        this.DiscNumber = source["DiscNumber"];
-	        this.Duration = source["Duration"];
-	        this.CoverPath = source["CoverPath"];
-	        this.AlbumFolder = source["AlbumFolder"];
+	        this.id = source["id"];
+	        this.path = source["path"];
+	        this.title = source["title"];
+	        this.artist = source["artist"];
+	        this.albumArtist = source["albumArtist"];
+	        this.album = source["album"];
+	        this.genre = source["genre"];
+	        this.year = source["year"];
+	        this.trackNumber = source["trackNumber"];
+	        this.discNumber = source["discNumber"];
+	        this.duration = source["duration"];
+	        this.coverPath = source["coverPath"];
+	        this.albumFolder = source["albumFolder"];
 	    }
 	}
 

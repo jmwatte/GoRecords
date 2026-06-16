@@ -104,12 +104,14 @@
           $currentIndex = Math.min(tracks.length - 1, $currentIndex + 1);
           e.stopPropagation();
           break;
-        case KEY.ENTER:
-          handlePlaySelected();
+        case KEY.ARROW_LEFT:
+        case KEY.ESCAPE:
+        case KEY.BACK:
+          handleCloseAlbum();
           e.stopPropagation();
           break;
-        case KEY.ESCAPE:
-          handleCloseAlbum();
+        case KEY.ENTER:
+          handlePlaySelected();
           e.stopPropagation();
           break;
       }
@@ -118,14 +120,6 @@
 
     // Crate-level navigation
     switch (e.key) {
-      case KEY.ARROW_LEFT:
-        $currentIndex = Math.max(0, $currentIndex - 1);
-        e.stopPropagation();
-        break;
-      case KEY.ARROW_RIGHT:
-        $currentIndex = Math.min(totalAlbums - 1, $currentIndex + 1);
-        e.stopPropagation();
-        break;
       case KEY.ARROW_UP:
         $currentIndex = Math.max(0, $currentIndex - 1);
         e.stopPropagation();
@@ -134,6 +128,7 @@
         $currentIndex = Math.min(totalAlbums - 1, $currentIndex + 1);
         e.stopPropagation();
         break;
+      case KEY.ARROW_RIGHT:
       case KEY.ENTER:
         if (albums[$currentIndex]) {
           handleOpenAlbum(albums[$currentIndex].albumFolder);
@@ -193,6 +188,7 @@
   let audioEl;
   let currentTrackPath = '';
   let isPlaying = false;
+  let nowPlaying = null; // { title, artist, albumArtist, coverPath }
   let currentTime = 0;
   let duration = 0;
   let volume = 1;
@@ -237,6 +233,12 @@
     const track = tracks[idx];
     if (track.path && audioEl) {
       currentTrackPath = track.path;
+      nowPlaying = {
+        title: track.title,
+        artist: track.artist,
+        albumArtist: track.albumArtist,
+        coverPath: track.coverPath,
+      };
       audioEl.src = audioSrc(track.path);
       audioEl.play().catch(err => {
         console.error('Playback failed:', err);
@@ -362,7 +364,7 @@
               {#if albums[$currentIndex]?.coverPath}
                 <img
                   class="album-art"
-                  src={albums[$currentIndex].coverPath}
+                  src={audioSrc(albums[$currentIndex].coverPath)}
                   alt={albums[$currentIndex].album}
                 />
               {:else}
@@ -458,9 +460,9 @@
   <!-- Fixed Now Playing bar -->
   <div class="now-playing-bar">
     <div class="np-track-info">
-      {#if tracks.length > 0 && tracks[$currentIndex]}
-        <span class="np-title">{tracks[$currentIndex].title || 'Unknown Track'}</span>
-        <span class="np-artist">{tracks[$currentIndex].artist || tracks[$currentIndex].albumArtist || 'Unknown Artist'}</span>
+      {#if nowPlaying}
+        <span class="np-title">{nowPlaying.title || 'Unknown Track'}</span>
+        <span class="np-artist">{nowPlaying.artist || nowPlaying.albumArtist || 'Unknown Artist'}</span>
       {:else}
         <span class="np-title np-muted">No track selected</span>
         <span class="np-artist np-muted">Select a track to play</span>

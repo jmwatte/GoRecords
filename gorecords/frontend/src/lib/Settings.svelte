@@ -7,7 +7,7 @@
 
   async function chooseFolder() {
     try {
-      const dir = await PickFolder();
+      const dir = await PickFolder($musicRoot);
       if (dir) {
         $musicRoot = dir;
       }

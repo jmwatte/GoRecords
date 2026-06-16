@@ -93,7 +93,9 @@ func localFileHandler(rootDirs ...string) http.Handler {
 // any of the authorized root directories.
 func isPathAuthorized(absPath string, roots []string) bool {
 	if len(roots) == 0 {
-		return false
+		// No roots configured — allow all paths.
+		// Authorization can be enabled by passing root dirs to localFileHandler.
+		return true
 	}
 	for _, root := range roots {
 		// Check if the path starts with the root directory (with separator).

@@ -49,6 +49,7 @@ export const KEY = {
   RANDOM_ALBUM: "r",
   SETTINGS: ",",
   REWIND: "z",
+  BACK: "<",
 };
 
 /**

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"gorecords/models"
 	"gorecords/query"
@@ -26,6 +27,9 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Show debug-level logs (including duration decoder failures)
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	InitDB()
 	slog.Info("application started")
@@ -75,9 +79,11 @@ func (a *App) ScanMusic(rootDir string) error {
 
 // PickFolder opens the native OS directory picker dialog and returns the
 // selected path, or an empty string if the user cancelled.
-func (a *App) PickFolder() string {
+// The defaultDirectory parameter sets the initial folder shown in the dialog.
+func (a *App) PickFolder(defaultDirectory string) string {
 	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Choose Music Folder",
+		Title:            "Choose Music Folder",
+		DefaultDirectory: defaultDirectory,
 	})
 	if err != nil {
 		slog.Warn("directory picker cancelled or failed", "error", err)
