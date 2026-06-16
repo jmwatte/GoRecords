@@ -85,6 +85,27 @@
     }
   }
 
+  // Auto-scroll to keep the selected track visible, with a 5-row offset from bottom
+  let tracksBodyEl;
+  $: if (tracksBodyEl && $isAlbumTracksView) {
+    const rows = tracksBodyEl.querySelectorAll('.track-row');
+    if ($currentIndex >= 0 && $currentIndex < rows.length) {
+      const row = rows[$currentIndex];
+      const rowRect = row.getBoundingClientRect();
+      const containerRect = tracksBodyEl.getBoundingClientRect();
+      const rowHeight = rowRect.height || 30;
+
+      // If row is below the visible area minus 5 rows, scroll down
+      if (rowRect.bottom > containerRect.bottom - rowHeight * 5) {
+        row.scrollIntoView({ block: 'end' });
+      }
+      // If row is above the visible area, scroll up
+      if (rowRect.top < containerRect.top) {
+        row.scrollIntoView({ block: 'start' });
+      }
+    }
+  }
+
   function handleKey(e) {
     // Global shortcuts (work in any view)
     if (e.key === KEY.REWIND) {
@@ -431,7 +452,7 @@
           <span class="col-artist">Artist</span>
           <span class="col-duration">Time</span>
         </div>
-        <div class="tracks-body">
+        <div class="tracks-body" bind:this={tracksBodyEl}>
           {#each discGroups as group}
             <div class="disc-separator">Disc {group.disc}</div>
             {#each group.tracks as track}
@@ -524,7 +545,8 @@
 
 <style>
   .app-shell {
-    flex: 1;
+    width: 100%;
+    height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -550,19 +572,21 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 1.5rem;
-    padding: 2rem;
+    gap: 1rem;
+    padding: 1rem 1rem 0;
     user-select: none;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .album-art-frame {
-    width: min(60vh, 420px);
-    height: min(60vh, 420px);
+    width: 100%;
+    max-width: min(80vh, 800px);
+    aspect-ratio: 1 / 1;
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-    transition: transform 0.15s ease;
+    flex-shrink: 0;
   }
 
   .album-art {
@@ -781,6 +805,7 @@
     border-top: 1px solid rgba(255, 255, 255, 0.08);
     user-select: none;
     height: 56px;
+    min-height: 56px;
   }
 
   .np-track-info {
