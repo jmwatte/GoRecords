@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,16 +38,10 @@ func localFileHandler(rootDirs ...string) http.Handler {
 			return
 		}
 
-		// URL-decode the path to handle special characters and spaces in filenames
-		decoded, err := url.PathUnescape(rawPath)
-		if err != nil {
-			slog.Warn("failed to decode media path", "path", rawPath, "error", err)
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-
-		// Clean and resolve to an absolute path (prevents directory traversal)
-		cleanPath := filepath.Clean(decoded)
+		// r.URL.Path is already decoded by Go's HTTP server.
+		// No need to call PathUnescape (doing so would double-decode
+		// and fail on filenames containing literal '%').
+		cleanPath := filepath.Clean(rawPath)
 		if !filepath.IsAbs(cleanPath) {
 			absPath, err := filepath.Abs(cleanPath)
 			if err != nil {

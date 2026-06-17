@@ -213,6 +213,9 @@ func ExtractTags(filePath string) (*models.Track, error) {
 		track.Album = filepath.Base(filepath.Dir(filePath))
 	}
 
+	// Normalize genre: split on common delimiters and rejoin with ", "
+	track.Genre = normalizeGenre(track.Genre)
+
 	// Walk-up cover art resolution
 	coverPath, albumFolder := ResolveCoverArt(dirFromPath(filePath))
 	track.CoverPath = coverPath
@@ -300,7 +303,14 @@ func durationFromTags(metadata tag.Metadata) float64 {
 // durationFromDecoderWithFile decodes an already-open audio file to calculate
 // duration. The caller must have Seek'd to position 0 before calling.
 // Errors are logged at Warn level so they're visible in the console.
-func durationFromDecoderWithFile(f *os.File, filePath string) float64 {
+func durationFromDecoderWithFile(f *os.File, filePath string) (d float64) {
+	// Catch panics from third-party decoders (e.g. go-mp3 on malformed files)
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("duration decoder: panicked", "path", filePath, "recover", r)
+			d = 0
+		}
+	}()
 	ext := strings.ToLower(filepath.Ext(filePath))
 
 	switch ext {
@@ -317,6 +327,12 @@ func durationFromDecoderWithFile(f *os.File, filePath string) float64 {
 		return float64(stream.Info.NSamples) / float64(stream.Info.SampleRate)
 
 	case ".mp3":
+		// Try Xing/Info header first (fast, no decode, can't panic)
+		dur := mp3Duration(filePath)
+		if dur > 0 {
+			return dur
+		}
+		// Fall back to full decoder
 		streamer, format, err := mp3.Decode(f)
 		if err != nil {
 			slog.Warn("duration decoder: mp3 decode failed", "path", filePath, "error", err)
@@ -754,6 +770,63 @@ func toString(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// normalizeGenre splits multi-genre strings on common delimiters and
+// returns a consistent comma-separated list.
+// Handles: "Rock,Pop", "Rock/Pop", "Rock; Pop", "(4)(13)" (ID3v2 numeric), etc.
+func normalizeGenre(genre string) string {
+	if genre == "" {
+		return ""
+	}
+
+	// Replace common delimiters with a uniform separator
+	replaced := strings.NewReplacer(
+		";", ",",
+		"/", ",",
+		"\\", ",",
+		" | ", ",",
+		"|", ",",
+	).Replace(genre)
+
+	parts := strings.Split(replaced, ",")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// Skip bare numeric or parenthesized-numeric genres (ID3v1 indices)
+		if isNumeric(p) || isParenNumeric(p) {
+			continue
+		}
+		out = append(out, p)
+	}
+
+	if len(out) == 0 {
+		return genre // return original if all parts were filtered
+	}
+	return strings.Join(out, ", ")
+}
+
+func isNumeric(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isParenNumeric(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	if s[0] != '(' || s[len(s)-1] != ')' {
+		return false
+	}
+	inner := s[1 : len(s)-1]
+	return isNumeric(inner)
 }
 
 // dirFromPath returns the parent directory of the given file path.

@@ -9,12 +9,12 @@ type Track struct {
 	Title       string    `json:"title"`
 	Artist      string    `gorm:"index" json:"artist"`
 	AlbumArtist string    `gorm:"index" json:"albumArtist"`
-	Album       string    `gorm:"index" json:"album"`
+	Album       string    `gorm:"index;index:idx_album_folder_album,priority:2" json:"album"`
 	Genre       string    `gorm:"index" json:"genre"`
 	Year        int       `gorm:"index" json:"year"`
 	TrackNumber int       `json:"trackNumber"`
 	DiscNumber  int       `json:"discNumber"`
 	Duration    float64   `json:"duration"`
 	CoverPath   string    `json:"coverPath"`
-	AlbumFolder string    `gorm:"index" json:"albumFolder"`
+	AlbumFolder string    `gorm:"index:idx_album_folder_album,priority:1" json:"albumFolder"`
 }
