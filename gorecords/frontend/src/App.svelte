@@ -85,24 +85,24 @@
     }
   }
 
-  // Auto-scroll to keep the selected track visible, with a 5-row offset from bottom
+  // Auto-scroll to keep the selected track visible
   let tracksBodyEl;
-  $: if (tracksBodyEl && $isAlbumTracksView) {
-    const rows = tracksBodyEl.querySelectorAll('.track-row');
-    if ($currentIndex >= 0 && $currentIndex < rows.length) {
-      const row = rows[$currentIndex];
-      const rowRect = row.getBoundingClientRect();
-      const containerRect = tracksBodyEl.getBoundingClientRect();
-      const rowHeight = rowRect.height || 30;
+  let prevIndex = -1;
+  $: if (tracksBodyEl && $isAlbumTracksView && $currentIndex >= 0 && $currentIndex !== prevIndex) {
+    prevIndex = $currentIndex;
+    const sel = tracksBodyEl.querySelector('.track-row.selected');
+    if (sel) {
+      sel.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
 
-      // If row is below the visible area minus 5 rows, scroll down
-      if (rowRect.bottom > containerRect.bottom - rowHeight * 5) {
-        row.scrollIntoView({ block: 'end' });
-      }
-      // If row is above the visible area, scroll up
-      if (rowRect.top < containerRect.top) {
-        row.scrollIntoView({ block: 'start' });
-      }
+  // Also scroll to keep currentIndex visible when entering a new album
+  let prevAlbumFolder = '';
+  $: if ($activeAlbumFolder && $activeAlbumFolder !== prevAlbumFolder) {
+    prevAlbumFolder = $activeAlbumFolder;
+    // Reset scroll when entering a new album
+    if (tracksBodyEl) {
+      tracksBodyEl.scrollTop = 0;
     }
   }
 
