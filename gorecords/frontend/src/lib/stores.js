@@ -152,3 +152,40 @@ export function filtersToPayload(filters) {
  * Populated by the backend on data refresh.
  */
 export const facetData = writable({});
+
+// -------------------------------------------------------------------------
+// Marking System
+// -------------------------------------------------------------------------
+
+/**
+ * Marked items: array of { id, type, label }.
+ * - type: "track" | "album" | "genre" | "year" | "album_artist"
+ * - id:   unique identifier (path, folder, or value string)
+ * - label: human-readable label for display
+ */
+export const markedItems = writable([]);
+
+/** Toggle a mark on/off. */
+export function toggleMark(item) {
+  markedItems.update((list) => {
+    const idx = list.findIndex((m) => m.type === item.type && m.id === item.id);
+    if (idx >= 0) {
+      return [...list.slice(0, idx), ...list.slice(idx + 1)];
+    }
+    return [...list, item];
+  });
+}
+
+/** Check if an item is currently marked. */
+export function isMarked(type, id) {
+  let result = false;
+  markedItems.subscribe((list) => {
+    result = list.some((m) => m.type === type && m.id === id);
+  })();
+  return result;
+}
+
+/** Clear all marks. */
+export function clearMarks() {
+  markedItems.set([]);
+}

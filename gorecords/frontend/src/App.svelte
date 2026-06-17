@@ -21,6 +21,9 @@
         clearFilters,
         filtersToPayload,
         facetData,
+        markedItems,
+        toggleMark,
+        clearMarks,
     } from "./lib/stores.js";
     import {
         GetAlbumTracks,
@@ -67,6 +70,13 @@
     }
     // Reset highlight when category picker opens
     $: if ($activePicker === "add") catIdx = 0;
+    // Scroll highlighted mark action into view
+    $: if (showMarkActions && markActionsBody && markActionIdx >= 0) {
+        const el = markActionsBody.querySelector(".picker-highlight");
+        if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    // Reset highlight when mark action popup opens
+    $: if (showMarkActions) markActionIdx = 0;
 
     // Breadcrumb navigation mode — toggled by B (Shift+b)
     // Using a store so Svelte tracks changes from inside handleAction()
@@ -88,6 +98,43 @@
         $activePicker = chip.category;
     }
     function handleCatPicker(e) {
+        // Handle mark action popup keyboard navigation
+        if (showMarkActions) {
+            switch (e.key) {
+                case "ArrowUp":
+                    e.preventDefault();
+                    markActionIdx = Math.max(0, markActionIdx - 1);
+                    break;
+                case "ArrowDown":
+                    e.preventDefault();
+                    markActionIdx = Math.min(3, markActionIdx + 1);
+                    break;
+                case "Enter":
+                    e.preventDefault();
+                    switch (markActionIdx) {
+                        case 0:
+                            playMarked();
+                            break;
+                        case 1:
+                            showMarkActions = false;
+                            break;
+                        case 2:
+                            showMarkActions = false;
+                            break;
+                        case 3:
+                            clearMarks();
+                            showMarkActions = false;
+                            break;
+                    }
+                    break;
+                case "Escape":
+                    e.preventDefault();
+                    showMarkActions = false;
+                    break;
+            }
+            return;
+        }
+
         // Only handle keys when the add picker is open
         if ($activePicker !== "add") return;
         switch (e.key) {
@@ -157,6 +204,31 @@
     // Current sort state — persisted across refreshes
     let currentSortBy = "album";
     let currentSortDir = "ASC";
+
+    // Mark action popup state
+    let showMarkActions = false;
+    let markActionIdx = 0;
+    let markActionsBody;
+
+    // Build a play queue from all marked albums and start playing
+    async function playMarked() {
+        showMarkActions = false;
+        let allTracks = [];
+        for (const item of $markedItems) {
+            if (item.type === "track") {
+                continue; // individual track support needs backend lookup
+            } else if (item.type === "album") {
+                const albumTracks = await GetAlbumTracks(item.id);
+                allTracks.push(...albumTracks);
+            }
+        }
+        if (allTracks.length === 0) {
+            showToast("No albums in marks to play", "warn");
+            return;
+        }
+        tracks = allTracks;
+        playTrack(0);
+    }
 
     // Fetch albums and facets from the backend
     async function refreshData() {
@@ -241,6 +313,26 @@
     function handleAction(action) {
         // Global shortcuts (work in any view)
         switch (action) {
+            case "toggle_mark":
+                // Don't mark when a picker is open
+                if ($activePicker) return;
+                if ($isAlbumTracksView && tracks[$currentIndex]) {
+                    toggleMark({
+                        type: "track",
+                        id: tracks[$currentIndex].path,
+                        label: tracks[$currentIndex].title,
+                    });
+                } else if (albums[$currentIndex]) {
+                    toggleMark({
+                        type: "album",
+                        id: albums[$currentIndex].albumFolder,
+                        label: albums[$currentIndex].album,
+                    });
+                }
+                return;
+            case "show_mark_actions":
+                showMarkActions = true;
+                return;
             case "open_folder":
                 if (tracks[$currentIndex]) {
                     OpenFolder(tracks[$currentIndex].path);
@@ -473,6 +565,7 @@
     let currentTrackPath = "";
     let isPlaying = false;
     let nowPlaying = null; // { title, artist, albumArtist, coverPath }
+    let nowPlayingIndex = -1; // index in tracks[] of currently playing track
     let currentTime = 0;
     let duration = 0;
     let volume = 1;
@@ -513,7 +606,10 @@
     // Play the track at the given index in the current tracks list
     function playTrack(idx) {
         if (!tracks[idx]) return;
-        $currentIndex = idx;
+        if ($isAlbumTracksView) {
+            $currentIndex = idx;
+        }
+        nowPlayingIndex = idx;
         const track = tracks[idx];
         if (track.path && audioEl) {
             currentTrackPath = track.path;
@@ -525,6 +621,8 @@
             };
             audioEl.src = audioSrc(track.path);
             audioEl.play().catch((err) => {
+                // AbortError is benign — play() was interrupted by a new src
+                if (err.name === "AbortError") return;
                 console.error("Playback failed:", err);
                 showToast("Playback failed for this track", "warn");
             });
@@ -547,7 +645,7 @@
 
     // Auto-advance to next track when current one ends
     function onTrackEnded() {
-        const next = $currentIndex + 1;
+        const next = nowPlayingIndex + 1;
         if (tracks.length > 0 && next < tracks.length) {
             playTrack(next);
         } else {
@@ -568,12 +666,14 @@
     }
 
     function prevTrack() {
-        const prev = $currentIndex - 1;
+        if (nowPlayingIndex < 0) return;
+        const prev = nowPlayingIndex - 1;
         if (prev >= 0) playTrack(prev);
     }
 
     function nextTrack() {
-        const next = $currentIndex + 1;
+        if (nowPlayingIndex < 0) return;
+        const next = nowPlayingIndex + 1;
         if (next < tracks.length) playTrack(next);
     }
 
@@ -650,11 +750,13 @@
             audioEl?.pause();
         });
         navigator.mediaSession.setActionHandler("previoustrack", () => {
-            const prev = $currentIndex - 1;
+            if (nowPlayingIndex < 0) return;
+            const prev = nowPlayingIndex - 1;
             if (prev >= 0) playTrack(prev);
         });
         navigator.mediaSession.setActionHandler("nexttrack", () => {
-            const next = $currentIndex + 1;
+            if (nowPlayingIndex < 0) return;
+            const next = nowPlayingIndex + 1;
             if (next < tracks.length) playTrack(next);
         });
     }
@@ -698,6 +800,18 @@
                         }}
                         title="Add filter">+</button
                     >
+                    {#if $markedItems.length > 0}
+                        <button
+                            class="breadcrumb-chip mark-badge"
+                            on:click={() => (showMarkActions = true)}
+                            title="Show mark actions"
+                        >
+                            <span class="badge-icon">{"\u2713"}</span>
+                            <span class="breadcrumb-value"
+                                >{$markedItems.length}</span
+                            >
+                        </button>
+                    {/if}
                     {#if $filterStack.length > 0}
                         <button
                             class="breadcrumb-clear"
@@ -890,6 +1004,78 @@
                             >
                         </button>
                     {/each}
+                </div>
+            </div>
+        </div>
+    {:else if showMarkActions}
+        <!-- Mark action popup -->
+        <div
+            class="picker-overlay"
+            on:click|self={() => (showMarkActions = false)}
+        >
+            <div class="picker-panel">
+                <div class="picker-header">
+                    <h3 class="picker-title">
+                        {$markedItems.length} item{$markedItems.length > 1
+                            ? "s"
+                            : ""} marked
+                    </h3>
+                    <button
+                        class="picker-close"
+                        on:click={() => (showMarkActions = false)}>✕</button
+                    >
+                </div>
+                <div class="picker-body" bind:this={markActionsBody}>
+                    <!-- List of marked items -->
+                    {#each $markedItems as item}
+                        <div class="marked-item-row">
+                            <span class="marked-item-type">{item.type}</span>
+                            <span class="marked-item-label">{item.label}</span>
+                        </div>
+                    {/each}
+                    <hr class="picker-divider" />
+                    <button
+                        class="picker-item"
+                        class:picker-highlight={markActionIdx === 0}
+                        on:click={playMarked}
+                        on:mouseenter={() => (markActionIdx = 0)}
+                    >
+                        <span class="picker-item-value">Play All</span>
+                    </button>
+                    <button
+                        class="picker-item"
+                        class:picker-highlight={markActionIdx === 1}
+                        on:click={() => {
+                            showMarkActions = false;
+                        }}
+                        on:mouseenter={() => (markActionIdx = 1)}
+                    >
+                        <span class="picker-item-value">Add to Queue</span>
+                    </button>
+                    <button
+                        class="picker-item"
+                        class:picker-highlight={markActionIdx === 2}
+                        on:click={() => {
+                            showMarkActions = false;
+                        }}
+                        on:mouseenter={() => (markActionIdx = 2)}
+                    >
+                        <span class="picker-item-value">Create Playlist</span>
+                    </button>
+                    <button
+                        class="picker-item"
+                        class:picker-highlight={markActionIdx === 3}
+                        on:click={() => {
+                            clearMarks();
+                            showMarkActions = false;
+                        }}
+                        on:mouseenter={() => (markActionIdx = 3)}
+                    >
+                        <span
+                            class="picker-item-value"
+                            style="color:rgba(255,80,80,0.8)">Clear Marks</span
+                        >
+                    </button>
                 </div>
             </div>
         </div>
@@ -1504,6 +1690,15 @@
         cursor: pointer;
     }
 
+    .mark-badge {
+        background: rgba(70, 130, 200, 0.2) !important;
+        border-color: rgba(70, 130, 200, 0.4) !important;
+    }
+
+    .badge-icon {
+        font-size: 0.8rem;
+    }
+
     .breadcrumb-add:hover {
         background: rgba(70, 130, 200, 0.2);
         border-color: rgba(70, 130, 200, 0.4);
@@ -1600,6 +1795,34 @@
 
     .picker-item:hover {
         background: rgba(70, 130, 200, 0.2);
+    }
+
+    .marked-item-row {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.3rem 0.75rem;
+        font-size: 0.75rem;
+        color: rgba(255, 255, 255, 0.6);
+    }
+
+    .marked-item-type {
+        color: rgba(255, 255, 255, 0.35);
+        text-transform: uppercase;
+        font-size: 0.65rem;
+        flex-shrink: 0;
+        width: 4rem;
+    }
+
+    .marked-item-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .picker-divider {
+        border: none;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        margin: 0.5rem 0;
     }
 
     .picker-highlight {
