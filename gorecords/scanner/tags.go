@@ -198,8 +198,12 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	}
 
 	if track.Duration <= 0 {
-		f.Seek(0, 0)
-		track.Duration = durationFromDecoderWithFile(f, filePath)
+		// CRITICAL: Reset file pointer before decoding
+		if _, err := f.Seek(0, 0); err != nil {
+			slog.Warn("Failed to seek for duration calculation", "path", filePath, "error", err)
+		} else {
+			track.Duration = durationFromDecoderWithFile(f, filePath)
+		}
 	}
 
 	slog.Debug("extracted tags",
@@ -358,8 +362,9 @@ func durationFromMP4Container(f *os.File, filePath string) float64 {
 	return float64(duration) / float64(mvhd.Timescale)
 }
 
-// durationFromAPE parses the APE file header and descriptor to extract duration
-// without decoding the actual audio. Pure Go, no external dependencies.
+// durationFromAPE parses the APE file header to extract duration.
+// For v3.98+ it uses seek-table-based calculation (total frames x blocks/frame).
+// For older versions it reads the descriptor at end of file.
 func durationFromAPE(f *os.File, filePath string) float64 {
 	// Reset file position to beginning
 	if _, err := f.Seek(0, 0); err != nil {
@@ -367,69 +372,109 @@ func durationFromAPE(f *os.File, filePath string) float64 {
 		return 0
 	}
 
-	// Read APE Header (first 32 bytes)
-	// Format: MAC (3) + Version (2) + DescriptorLength (4) + HeaderLength (4) +
-	//         SeekTableLength (4) + HeaderDataLength (4) + APEFrameCount (4) +
-	//         FinalFrameBlocks (4) + TotalFrames (4) + BitsPerSample (2) +
-	//         Channels (2) + SampleRate (4)
-	header := make([]byte, 32)
-	if _, err := io.ReadFull(f, header); err != nil {
+	// Read enough for header + descriptor
+	buf := make([]byte, 100)
+	if _, err := io.ReadFull(f, buf); err != nil {
 		slog.Debug("Failed to read APE header", "path", filePath, "error", err)
 		return 0
 	}
 
-	// Verify "MAC" signature
-	if string(header[0:3]) != "MAC" {
+	if string(buf[0:3]) != "MAC" {
 		slog.Debug("Invalid APE signature", "path", filePath)
 		return 0
 	}
 
-	// Extract Sample Rate (bytes 28-31, little-endian uint32)
-	sampleRate := binary.LittleEndian.Uint32(header[28:32])
-	if sampleRate == 0 {
-		slog.Debug("APE has 0 sample rate", "path", filePath)
-		return 0
+	version := binary.LittleEndian.Uint16(buf[4:6])
+
+	if version >= 3980 {
+		// v3.98+ — use seek table to calculate duration
+		// Fields: [0:4]"MAC " [4:6]version [6:8]compLevel
+		//         [8:12]descLen [12:16]headerLen
+		//         [16:20]seekTableBytes [20:24]headerDataBytes
+		seekTableBytes := binary.LittleEndian.Uint32(buf[16:20])
+		compressionLevel := binary.LittleEndian.Uint16(buf[6:8])
+
+		// SampleRate is in the WAVEFORMATEX at the end of the descriptor
+		descLen := binary.LittleEndian.Uint32(buf[8:12])
+		headerLen := int64(binary.LittleEndian.Uint32(buf[12:16]))
+		descTotal := headerLen + int64(descLen)
+
+		// Read the full descriptor if needed
+		if descTotal > 100 && descTotal <= 5200 {
+			extra := make([]byte, descTotal-100)
+			if _, err := io.ReadFull(f, extra); err != nil {
+				slog.Debug("Failed to read APE descriptor", "path", filePath, "error", err)
+				return 0
+			}
+			buf = append(buf, extra...)
+		}
+
+		// Locate SampleRate (last 4 bytes of descriptor that match a common value)
+		var sampleRate uint32
+		for offset := descTotal - 4; offset >= headerLen+8; offset -= 4 {
+			sr := binary.LittleEndian.Uint32(buf[offset : offset+4])
+			if sr == 44100 || sr == 48000 || sr == 88200 || sr == 96000 || sr == 192000 {
+				sampleRate = sr
+				break
+			}
+		}
+		if sampleRate == 0 {
+			slog.Debug("APE: could not find sample rate", "path", filePath)
+			return 0
+		}
+
+		// Number of frames from seek table (4-byte entries)
+		if seekTableBytes == 0 || seekTableBytes%4 != 0 {
+			slog.Debug("APE: invalid seek table size", "path", filePath, "bytes", seekTableBytes)
+			return 0
+		}
+		numFrames := int(seekTableBytes / 4)
+
+		// Blocks per frame depends on compression level
+		//   fast / default (<=1000) → 73728
+		//   normal, high, extra high, insane → 4608
+		blocksPerFrame := uint64(4608)
+		if compressionLevel <= 1000 {
+			blocksPerFrame = 73728
+		}
+
+		// Total blocks = (numFrames - 1) * blocksPerFrame + finalFrameBlocks
+		// finalFrameBlocks is not easily accessible, so approximate
+		totalBlocks := uint64(numFrames-1) * blocksPerFrame
+		if totalBlocks == 0 {
+			slog.Debug("APE: 0 total blocks", "path", filePath)
+			return 0
+		}
+
+		return float64(totalBlocks) / float64(sampleRate)
 	}
 
-	// Get file size to locate the APE Descriptor at the end
+	// Older versions (< v3.98): descriptor at end of file
 	fileInfo, err := f.Stat()
 	if err != nil {
 		slog.Debug("Failed to stat APE file", "path", filePath, "error", err)
 		return 0
 	}
-	fileSize := fileInfo.Size()
-
-	// APE Descriptor is always 32 bytes and sits right before the optional APE Tag
-	// For simplicity, we'll try to read the last 32 bytes as the descriptor
-	// Note: This works for most APE files. If there's an APE tag, the descriptor
-	// is immediately before it, but reading the last 32 bytes usually still gives
-	// us valid data since the descriptor structure is consistent.
-	descriptorOffset := fileSize - 32
+	descriptorOffset := fileInfo.Size() - 32
 	if descriptorOffset < 32 {
 		slog.Debug("APE file too small", "path", filePath)
 		return 0
 	}
-
 	if _, err := f.Seek(descriptorOffset, 0); err != nil {
 		slog.Debug("Failed to seek APE descriptor", "path", filePath, "error", err)
 		return 0
 	}
-
-	descriptor := make([]byte, 32)
-	if _, err := io.ReadFull(f, descriptor); err != nil {
+	desc := make([]byte, 32)
+	if _, err := io.ReadFull(f, desc); err != nil {
 		slog.Debug("Failed to read APE descriptor", "path", filePath, "error", err)
 		return 0
 	}
-
-	// Extract Total Frames from descriptor (bytes 20-23, little-endian uint32)
-	// In the APE descriptor, offset 20 is TotalFrames
-	totalFrames := binary.LittleEndian.Uint32(descriptor[20:24])
-	if totalFrames == 0 {
-		slog.Debug("APE has 0 total frames", "path", filePath)
+	totalFrames := binary.LittleEndian.Uint32(desc[20:24])
+	sampleRate := binary.LittleEndian.Uint32(buf[28:32])
+	if totalFrames == 0 || sampleRate == 0 {
+		slog.Debug("APE: invalid frames or sample rate", "path", filePath)
 		return 0
 	}
-
-	// Duration = Total Frames / Sample Rate
 	return float64(totalFrames) / float64(sampleRate)
 }
 
