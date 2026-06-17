@@ -65,8 +65,12 @@ export function matchesShortcut(event, shortcut) {
   if (event.metaKey !== needsMeta) return false;
 
   // Check the base key
-  // Named keys (ArrowUp, Enter, Escape, Backspace, Tab) compare exactly by event.key
-  if (/^Arrow|^Enter$|^Escape$|^Backspace$|^Tab$/.test(baseKey)) {
+  // Named keys compare exactly by event.key
+  if (
+    /^Arrow|^Enter$|^Escape$|^Backspace$|^Tab$|^Delete$|^Home$|^End$|^PageUp$|^PageDown$|^Insert$/.test(
+      baseKey,
+    )
+  ) {
     return event.key === baseKey;
   }
   // Space is special: event.key is " " but the shortcut string is "Space"
@@ -78,10 +82,13 @@ export function matchesShortcut(event, shortcut) {
     return event.key === baseKey;
   }
 
-  // For single-character printable keys, compare case-sensitively.
-  // "g" matches event.key === 'g' (lowercase, no shift).
-  // "Shift+G" has needsShift=true, so the shift check above ensures event.key is 'G'.
-  if (baseKey.length === 1 && baseKey === event.key) {
+  // For single-character printable keys, compare case-insensitively.
+  // The modifier checks above already ensure that "g" (no Shift) won't
+  // match when shiftKey is true, and "Shift+G" requires shiftKey.
+  if (
+    baseKey.length === 1 &&
+    baseKey.toUpperCase() === event.key.toUpperCase()
+  ) {
     return true;
   }
 

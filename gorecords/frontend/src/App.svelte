@@ -1,5 +1,6 @@
 <script>
     import { onMount } from "svelte";
+    import { writable } from "svelte/store";
     import { initKeyboard, lastAction } from "./lib/keyboard.js";
     import {
         viewMode,
@@ -32,7 +33,27 @@
     import FilterPicker from "./lib/FilterPicker.svelte";
     import Toasts from "./lib/Toasts.svelte";
     import { showToast } from "./lib/toastStore.js";
+    // State for editing a breadcrumb filter in place
+    let editingIndex = -1;
+    let prevStackLength = $filterStack.length;
 
+    // Detect when a new filter is added while we are editing
+    $: {
+        const currentLen = $filterStack.length;
+        if (editingIndex >= 0 && currentLen > prevStackLength) {
+            const stack = [...$filterStack];
+            const newFilter = stack.pop(); // Grab the newly added filter at the end
+            stack.splice(editingIndex, 0, newFilter); // Insert it at the original position
+            $filterStack = stack; // Update the store
+            editingIndex = -1;
+        }
+        prevStackLength = currentLen;
+    }
+
+    // Reset editingIndex if the picker is closed without adding a filter
+    $: if (!$activePicker) {
+        editingIndex = -1;
+    }
     let cleanup;
 
     // Category picker state
@@ -40,6 +61,10 @@
     const CATS = ["genre", "year", "artist"];
     // Reset highlight when category picker opens
     $: if ($activePicker === "add") catIdx = 0;
+
+    // Breadcrumb navigation mode — toggled by B (Shift+b)
+    // Using a store so Svelte tracks changes from inside handleAction()
+    const breadcrumbMode = writable(false);
     function handleCatPicker(e) {
         // Only handle keys when the add picker is open
         if ($activePicker !== "add") return;
@@ -54,6 +79,8 @@
                 break;
             case "Enter":
                 e.preventDefault();
+                pickerInitialValue = ""; // Reset
+                pickerEditIndex = -1; // Reset
                 $activePicker = CATS[catIdx];
                 break;
             case "Escape":
@@ -70,6 +97,8 @@
 
     // Track list — populated via Wails binding when album is opened
     let tracks = [];
+    let pickerInitialValue = "";
+    let pickerEditIndex = -1;
     let loadingTracks = false;
 
     // Cached index to restore on Escape
@@ -208,7 +237,28 @@
                     handleCloseAlbum();
                     break;
                 case "open_album":
-                    handlePlaySelected();
+                    if (
+                        $breadcrumbMode &&
+                        $breadcrumbIndex >= 0 &&
+                        $breadcrumbIndex < $filterStack.length
+                    ) {
+                        const cat = $filterStack[$breadcrumbIndex].category;
+
+                        // Capture the current state for the picker
+                        pickerInitialValue =
+                            $filterStack[$breadcrumbIndex].value;
+                        pickerEditIndex = $breadcrumbIndex;
+
+                        popFilter($breadcrumbIndex);
+                        $breadcrumbIndex = -1;
+                        $breadcrumbMode = false;
+                        $activePicker = cat;
+                    } else if (albums[$currentIndex]) {
+                        pickerInitialValue = "";
+                        pickerEditIndex = -1;
+                        handleOpenAlbum(albums[$currentIndex].albumFolder);
+                        $breadcrumbMode = false;
+                    }
                     break;
             }
             return;
@@ -216,13 +266,42 @@
 
         // Crate-level navigation
 
-        // toggle_picker must work even when picker is open (to close it)
+        // toggle_picker, breadcrumb_mode, delete_filter must work even when picker is open
         if (action === "toggle_picker") {
             if ($activePicker) {
                 activePicker.set(null);
             } else {
                 $breadcrumbIndex = -1;
                 $activePicker = "add";
+            }
+            return;
+        }
+        if (action === "breadcrumb_mode") {
+            const newMode = !$breadcrumbMode;
+            $breadcrumbMode = newMode;
+            if (newMode && $filterStack.length > 0) {
+                $breadcrumbIndex = $filterStack.length - 1;
+            } else {
+                $breadcrumbIndex = -1;
+            }
+            return;
+        }
+        if (action === "delete_filter") {
+            if (
+                $breadcrumbIndex >= 0 &&
+                $breadcrumbIndex < $filterStack.length
+            ) {
+                const idx = $breadcrumbIndex;
+                const oldLen = $filterStack.length;
+                popFilter(idx);
+                // Move highlight to the previous chip, or stay at same index
+                const newLen = oldLen - 1;
+                if (newLen === 0) {
+                    $breadcrumbIndex = -1;
+                    $breadcrumbMode = false;
+                } else {
+                    $breadcrumbIndex = Math.min(idx, newLen - 1);
+                }
             }
             return;
         }
@@ -234,13 +313,33 @@
             case "nav_up":
                 $currentIndex = Math.max(0, $currentIndex - 1);
                 $breadcrumbIndex = -1;
+                $breadcrumbMode = false;
                 break;
             case "nav_down":
                 $currentIndex = Math.min(totalAlbums - 1, $currentIndex + 1);
                 $breadcrumbIndex = -1;
+                $breadcrumbMode = false;
                 break;
-            case "breadcrumb_prev":
-                if ($filterStack.length > 0) {
+            case "open_album":
+                // Enter: when in breadcrumb mode and crumb highlighted, open its picker
+                if (
+                    $breadcrumbMode &&
+                    $breadcrumbIndex >= 0 &&
+                    $breadcrumbIndex < $filterStack.length
+                ) {
+                    const cat = $filterStack[$breadcrumbIndex].category;
+                    popFilter($breadcrumbIndex);
+                    $breadcrumbIndex = -1;
+                    $breadcrumbMode = false;
+                    $activePicker = cat;
+                } else if (albums[$currentIndex]) {
+                    handleOpenAlbum(albums[$currentIndex].albumFolder);
+                    $breadcrumbMode = false;
+                }
+                break;
+            // Arrow keys in breadcrumb mode: navigate crumbs
+            case "go_back": // ArrowLeft
+                if ($breadcrumbMode && $filterStack.length > 0) {
                     $breadcrumbIndex = Math.max(
                         0,
                         ($breadcrumbIndex >= 0
@@ -249,45 +348,15 @@
                     );
                 }
                 break;
-            case "breadcrumb_next":
-                if ($filterStack.length > 0) {
+            case "enter_album": // ArrowRight
+                if ($breadcrumbMode && $filterStack.length > 0) {
                     $breadcrumbIndex = Math.min(
                         $filterStack.length - 1,
                         ($breadcrumbIndex >= 0 ? $breadcrumbIndex : -1) + 1,
                     );
-                }
-                break;
-            case "open_album":
-                // Enter: open album, or re-open picker when breadcrumb highlighted
-                if (
-                    $breadcrumbIndex >= 0 &&
-                    $breadcrumbIndex < $filterStack.length
-                ) {
-                    const cat = $filterStack[$breadcrumbIndex].category;
-                    popFilter($breadcrumbIndex);
-                    $breadcrumbIndex = -1;
-                    $activePicker = cat;
                 } else if (albums[$currentIndex]) {
                     handleOpenAlbum(albums[$currentIndex].albumFolder);
-                }
-                break;
-            case "enter_album":
-                // ArrowRight: just open album, no breadcrumb interference
-                if (albums[$currentIndex]) {
-                    handleOpenAlbum(albums[$currentIndex].albumFolder);
-                }
-                break;
-            case "delete_filter":
-                // Delete: remove the highlighted breadcrumb filter
-                if (
-                    $breadcrumbIndex >= 0 &&
-                    $breadcrumbIndex < $filterStack.length
-                ) {
-                    popFilter($breadcrumbIndex);
-                    $breadcrumbIndex = Math.min(
-                        $breadcrumbIndex,
-                        $filterStack.length - 2,
-                    );
+                    $breadcrumbMode = false;
                 }
                 break;
             case "visual_mode":
@@ -533,16 +602,22 @@
         <div class="crate-layout">
             <div class="crate-content">
                 <!-- Breadcrumb bar: filter stack chips + add button -->
-                <div class="breadcrumb-bar">
+                <div
+                    class="breadcrumb-bar"
+                    class:breadcrumb-mode-active={$breadcrumbMode}
+                >
                     {#each $filterStack as filter, i}
                         <button
                             class="breadcrumb-chip"
                             class:breadcrumb-active={i === $breadcrumbIndex}
                             on:click={() => {
                                 $breadcrumbIndex = i;
+                                $breadcrumbMode = true; // <--- ADD THIS so Enter works after a mouse click
                             }}
                             on:dblclick={() => {
                                 const cat = filter.category;
+                                pickerInitialValue = filter.value; // Capture value
+                                pickerEditIndex = i; // Capture index
                                 popFilter(i);
                                 $breadcrumbIndex = -1;
                                 $activePicker = cat;
@@ -742,7 +817,26 @@
             </div>
         </div>
     {:else if $activePicker}
-        <FilterPicker category={$activePicker} />
+        <FilterPicker
+            category={$activePicker}
+            initialValue={pickerInitialValue}
+            onSelect={(value) => {
+                // If we are editing an existing breadcrumb, insert it at the exact same index
+                if (pickerEditIndex >= 0) {
+                    const newStack = [...$filterStack];
+                    newStack.splice(pickerEditIndex, 0, {
+                        category: $activePicker,
+                        value,
+                    });
+                    filterStack.set(newStack);
+                    pickerEditIndex = -1;
+                } else {
+                    // Otherwise, just push it to the end like normal
+                    pushFilter($activePicker, value);
+                }
+                activePicker.set(null);
+            }}
+        />
     {/if}
 
     <!-- Fixed Now Playing bar -->
@@ -855,77 +949,74 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 1rem;
-        padding: 1rem 1rem 0;
+        gap: 0.25rem;
+        padding: 0.5rem 1rem 0;
         user-select: none;
         min-height: 0;
         overflow: hidden;
     }
 
     .album-art-frame {
+        flex: 1;
+        min-height: 0;
         width: 100%;
-        max-width: min(80vh, 800px);
-        aspect-ratio: 1 / 1;
-        border-radius: 8px;
-        overflow: hidden;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-        flex-shrink: 0;
-    }
-
-    .album-art {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-    }
-
-    .album-art-placeholder {
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(135deg, #2a3a5c, #1a2a4a);
         display: flex;
         align-items: center;
         justify-content: center;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        border-radius: 8px;
+        overflow: hidden;
     }
 
-    .placeholder-text {
-        font-size: 6rem;
-        font-weight: 700;
-        color: rgba(255, 255, 255, 0.15);
+    .album-art {
+        max-width: 100%;
+        max-height: 100%;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+        border-radius: 8px;
     }
 
     .album-meta {
+        flex-shrink: 0;
         text-align: center;
+        padding-bottom: 0.25rem;
     }
 
     .album-title {
         margin: 0;
-        font-size: 1.6rem;
-        font-weight: 600;
+        font-size: 1rem;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.85);
+        line-height: 1.3;
     }
 
     .album-artist {
-        margin: 0.25rem 0 0.5rem;
-        font-size: 1.1rem;
+        margin: 0;
+        font-size: 0.8rem;
         font-weight: 400;
-        color: rgba(255, 255, 255, 0.6);
-    }
-
-    .sep {
-        margin: 0 0.5rem;
-        color: rgba(255, 255, 255, 0.3);
+        color: rgba(255, 255, 255, 0.5);
+        line-height: 1.3;
     }
 
     .album-year,
     .album-genre {
-        font-size: 0.9rem;
-        color: rgba(255, 255, 255, 0.5);
+        font-size: 0.7rem;
+        color: rgba(255, 255, 255, 0.4);
+        line-height: 1.2;
     }
 
     .nav-hint {
-        font-size: 0.8rem;
-        color: rgba(255, 255, 255, 0.3);
+        font-size: 0.7rem;
+        color: rgba(255, 255, 255, 0.25);
         letter-spacing: 0.1em;
+        line-height: 1.2;
+    }
+
+    .sep {
+        color: rgba(255, 255, 255, 0.2);
+        margin: 0 0.3rem;
     }
 
     /* ===== Text Mode (Ledger) ===== */
@@ -1252,6 +1343,11 @@
         border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     }
 
+    .breadcrumb-mode-active {
+        background: rgba(70, 130, 200, 0.08);
+        outline: 1px solid rgba(70, 130, 200, 0.3);
+    }
+
     .breadcrumb-chip {
         display: inline-flex;
         align-items: center;
@@ -1410,5 +1506,10 @@
 
     .picker-item:hover {
         background: rgba(70, 130, 200, 0.2);
+    }
+
+    .picker-highlight {
+        background: rgba(70, 130, 200, 0.3) !important;
+        border: 1px solid rgba(70, 130, 200, 0.7);
     }
 </style>
