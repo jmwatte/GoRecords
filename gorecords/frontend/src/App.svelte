@@ -28,6 +28,7 @@
         GetAlbums,
         GetFilteredAlbums,
         GetFacets,
+        OpenFolder,
     } from "../wailsjs/go/main/App.js";
     import Settings from "./lib/Settings.svelte";
     import FilterPicker from "./lib/FilterPicker.svelte";
@@ -240,6 +241,13 @@
     function handleAction(action) {
         // Global shortcuts (work in any view)
         switch (action) {
+            case "open_folder":
+                if (tracks[$currentIndex]) {
+                    OpenFolder(tracks[$currentIndex].path);
+                } else if (albums[$currentIndex]) {
+                    OpenFolder(albums[$currentIndex].albumFolder);
+                }
+                return;
             case "rewind":
                 handleRewind();
                 return;

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 
 	"gorecords/models"
 	"gorecords/query"
@@ -71,6 +72,12 @@ func (a *App) ScanMusic(rootDir string) error {
 	slog.Info("scan music requested", "rootDir", rootDir)
 	emitter := &wailsProgressEmitter{ctx: a.ctx}
 	return scanner.FullSync(DB, rootDir, emitter)
+}
+
+// OpenFolder opens the file manager to show the containing folder of the given path.
+func (a *App) OpenFolder(path string) error {
+	cmd := exec.Command("explorer.exe", "/select,", path)
+	return cmd.Start()
 }
 
 // PickFolder opens the native OS directory picker dialog and returns the
