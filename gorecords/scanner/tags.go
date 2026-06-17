@@ -21,6 +21,80 @@ import (
 	"github.com/mewkiz/flac"
 )
 
+func parseM4ATags(f *os.File) *wavMetadata {
+	meta := &wavMetadata{}
+	var pendingKey string
+
+	// Map MP4 4-letter codes to your struct's field names
+	tagMap := map[string]string{
+		"©nam": "title",
+		"©ART": "artist",
+		"©alb": "album",
+		"©gen": "genre",
+		"©day": "year",
+		"©wrt": "composer", // Note: add to struct if needed
+		"aART": "albumArtist",
+	}
+
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil
+	}
+
+	mp4.ReadBoxStructure(f, func(h *mp4.ReadHandle) (interface{}, error) {
+		boxType := h.BoxInfo.Type.String()
+
+		// 1. If we hit a known tag box, set our pending key
+		if key, ok := tagMap[boxType]; ok {
+			pendingKey = key
+			return nil, nil
+		}
+
+		// 2. If we hit the "data" box, extract the text
+		if boxType == "data" && pendingKey != "" {
+			payload, _, err := h.ReadPayload()
+			if err == nil {
+				if d, ok := payload.(*mp4.Data); ok {
+					val := strings.TrimRight(string(d.Data), "\x00")
+
+					// Map the string to the correct field in your struct
+					switch pendingKey {
+					case "title":
+						meta.title = val
+					case "artist":
+						meta.artist = val
+					case "album":
+						meta.album = val
+					case "genre":
+						meta.genre = val
+					case "albumArtist":
+						meta.albumArtist = val
+					case "year":
+						if y, err := strconv.Atoi(val); err == nil {
+							meta.year = y
+						}
+					}
+				}
+			}
+			pendingKey = ""
+			return nil, nil
+		}
+
+		// 3. Reset pending key for other boxes
+		if pendingKey != "" && boxType != "data" {
+			pendingKey = ""
+		}
+
+		return nil, nil
+	})
+
+	// If we found nothing, return nil
+	if meta.title == "" && meta.artist == "" && meta.album == "" {
+		return nil
+	}
+
+	return meta
+}
+
 // ExtractTags reads audio metadata from the given file path, resolves
 // cover art via the walk-up resolver, and returns a populated Track.
 // If the file cannot be opened or has no readable tags, an error is returned
@@ -34,8 +108,11 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	}
 	defer f.Close()
 
+	var metadata tag.Metadata
+	var fallback *wavMetadata
+
 	// 1. Try the standard library first
-	metadata, err := tag.ReadFrom(f)
+	metadata, err = tag.ReadFrom(f)
 
 	// 2. If it fails, check if it's an unsupported format we can parse manually
 	if err != nil {
@@ -49,45 +126,63 @@ func ExtractTags(filePath string) (*models.Track, error) {
 
 		switch ext {
 		case ".wav":
-			metadata = parseWavInfo(f)
+			fallback = parseWavInfo(f) // Must return *wavMetadata
 		case ".ape":
-			metadata = parseApeTags(f)
+			fallback = parseApeTags(f) // Must return *wavMetadata
+		case ".m4a", ".mp4":
+			fallback = parseM4ATags(f) // Must return *wavMetadata
 		default:
-			// If it's WMA, AIFF, or something else, we truly can't read it.
 			slog.Debug("unsupported format, skipping", "path", filePath, "ext", ext, "error", err)
 			return nil, err
 		}
 	}
 
 	track := &models.Track{
-		Path:        filePath,
-		Title:       metadata.Title(),
-		Artist:      metadata.Artist(),
-		AlbumArtist: metadata.AlbumArtist(),
-		Album:       metadata.Album(),
-		Genre:       metadata.Genre(),
-		Year:        metadata.Year(),
+		Path: filePath,
 	}
 
-	// Track & Disc number
-	if tn, total := metadata.Track(); tn != 0 {
-		// Handle files where track is encoded as disc*100 + track (e.g. 101 = disc 1, track 1)
-		if tn > 100 && total > 0 && total < 100 {
-			track.TrackNumber = tn % 100
-		} else {
-			track.TrackNumber = tn
+	// 3. Map metadata to the track model based on which parser succeeded
+	if metadata != nil {
+		// Standard dhowden/tag path
+		track.Title = metadata.Title()
+		track.Artist = metadata.Artist()
+		track.AlbumArtist = metadata.AlbumArtist()
+		track.Album = metadata.Album()
+		track.Genre = metadata.Genre()
+		track.Year = metadata.Year()
+
+		if tn, total := metadata.Track(); tn != 0 {
+			if tn > 100 && total > 0 && total < 100 {
+				track.TrackNumber = tn % 100
+			} else {
+				track.TrackNumber = tn
+			}
 		}
-		_ = total
-	}
-	if dn, total := metadata.Disc(); dn != 0 {
-		track.DiscNumber = dn
-		_ = total
+		if dn, _ := metadata.Disc(); dn != 0 {
+			track.DiscNumber = dn
+		}
+	} else if fallback != nil {
+		// Custom fallback path (M4A, WAV, APE)
+		track.Title = fallback.title
+		track.Artist = fallback.artist
+		track.AlbumArtist = fallback.albumArtist
+		track.Album = fallback.album
+		track.Genre = fallback.genre
+		track.Year = fallback.year
+		track.TrackNumber = fallback.trackNumber
+		track.DiscNumber = fallback.discNumber
 	}
 
-	// Walk-up cover art resolution from the track's parent directory.
-	// If no cover art is found, still group tracks by their parent
-	// directory so they appear in the album listing (frontend will
-	// show a placeholder image).
+	// Fallback for files where tag library detects format but returns empty metadata
+	if track.Title == "" {
+		ext := filepath.Ext(filePath)
+		track.Title = strings.TrimSuffix(filepath.Base(filePath), ext)
+	}
+	if track.Album == "" {
+		track.Album = filepath.Base(filepath.Dir(filePath))
+	}
+
+	// Walk-up cover art resolution
 	coverPath, albumFolder := ResolveCoverArt(dirFromPath(filePath))
 	track.CoverPath = coverPath
 	if albumFolder == "" {
@@ -95,9 +190,13 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	}
 	track.AlbumFolder = albumFolder
 
-	// Duration: first try tag Raw() values, then fall back to pure Go decoder.
-	// The same file handle is reused (no close/re-open race).
-	track.Duration = durationFromTags(metadata)
+	// Duration logic
+	// Note: durationFromTags expects tag.Metadata. If we only have fallback, it will return 0,
+	// which is fine because the next line will use the decoder.
+	if metadata != nil {
+		track.Duration = durationFromTags(metadata)
+	}
+
 	if track.Duration <= 0 {
 		f.Seek(0, 0)
 		track.Duration = durationFromDecoderWithFile(f, filePath)
@@ -372,7 +471,7 @@ func (m *wavMetadata) Raw() map[string]interface{} { return nil }
 // parseWavInfo extracts basic metadata from a WAV file's RIFF LIST INFO chunk.
 // WAV files store metadata in LIST chunks of type INFO with 4-letter codes
 // such as INAM (Title), IART (Artist), IPRD (Album), etc.
-func parseWavInfo(f *os.File) tag.Metadata {
+func parseWavInfo(f *os.File) *wavMetadata {
 	meta := &wavMetadata{}
 
 	buf := make([]byte, 8)
@@ -452,7 +551,7 @@ func parseWavInfo(f *os.File) tag.Metadata {
 // parseApeTags extracts APEv2 tags from the end of an APE file.
 // APEv2 stores a 32-byte footer at the end of the file with the signature
 // "APETAGEX", followed by the tag data immediately before it.
-func parseApeTags(f *os.File) tag.Metadata {
+func parseApeTags(f *os.File) *wavMetadata {
 	meta := &wavMetadata{}
 
 	fileInfo, err := f.Stat()
