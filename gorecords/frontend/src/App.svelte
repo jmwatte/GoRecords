@@ -35,6 +35,34 @@
 
     let cleanup;
 
+    // Category picker state
+    let catIdx = 0;
+    const CATS = ["genre", "year", "artist"];
+    // Reset highlight when category picker opens
+    $: if ($activePicker === "add") catIdx = 0;
+    function handleCatPicker(e) {
+        // Only handle keys when the add picker is open
+        if ($activePicker !== "add") return;
+        switch (e.key) {
+            case "ArrowUp":
+                e.preventDefault();
+                catIdx = Math.max(0, catIdx - 1);
+                break;
+            case "ArrowDown":
+                e.preventDefault();
+                catIdx = Math.min(CATS.length - 1, catIdx + 1);
+                break;
+            case "Enter":
+                e.preventDefault();
+                $activePicker = CATS[catIdx];
+                break;
+            case "Escape":
+                e.preventDefault();
+                activePicker.set(null);
+                break;
+        }
+    }
+
     // Album list — fetched from backend on mount
     let albums = [];
     let totalAlbums = 0;
@@ -187,6 +215,21 @@
         }
 
         // Crate-level navigation
+
+        // toggle_picker must work even when picker is open (to close it)
+        if (action === "toggle_picker") {
+            if ($activePicker) {
+                activePicker.set(null);
+            } else {
+                $breadcrumbIndex = -1;
+                $activePicker = "add";
+            }
+            return;
+        }
+
+        // Skip other crate navigation when a picker is open (picker handles its own keys)
+        if ($activePicker) return;
+
         switch (action) {
             case "nav_up":
                 $currentIndex = Math.max(0, $currentIndex - 1);
@@ -234,6 +277,19 @@
                     handleOpenAlbum(albums[$currentIndex].albumFolder);
                 }
                 break;
+            case "delete_filter":
+                // Delete: remove the highlighted breadcrumb filter
+                if (
+                    $breadcrumbIndex >= 0 &&
+                    $breadcrumbIndex < $filterStack.length
+                ) {
+                    popFilter($breadcrumbIndex);
+                    $breadcrumbIndex = Math.min(
+                        $breadcrumbIndex,
+                        $filterStack.length - 2,
+                    );
+                }
+                break;
             case "visual_mode":
                 if (!$isVisualMode) toggleViewMode();
                 break;
@@ -246,15 +302,6 @@
                 break;
             case "random_album":
                 handleRandomAlbum();
-                break;
-            case "toggle_picker":
-                // b: toggle the add filter picker
-                if ($activePicker) {
-                    activePicker.set(null);
-                } else {
-                    $breadcrumbIndex = -1;
-                    $activePicker = "add";
-                }
                 break;
         }
     }
@@ -667,7 +714,7 @@
 
     <!-- Filter Picker overlays -->
     {#if $activePicker === "add"}
-        <!-- Category chooser when user clicks + -->
+        <!-- Category chooser with keyboard navigation (first item pre-selected) -->
         <div class="picker-overlay">
             <div class="picker-panel">
                 <div class="picker-header">
@@ -678,10 +725,12 @@
                     >
                 </div>
                 <div class="picker-body">
-                    {#each ["genre", "year", "artist"] as cat}
+                    {#each CATS as cat, i}
                         <button
                             class="picker-item"
+                            class:picker-highlight={i === catIdx}
                             on:click={() => ($activePicker = cat)}
+                            on:mouseenter={() => (catIdx = i)}
                         >
                             <span
                                 class="picker-item-value"
@@ -774,6 +823,8 @@
         on:loadedmetadata={onLoadedMetadata}
     ></audio>
 </div>
+
+<svelte:window on:keydown={handleCatPicker} />
 
 <style>
     .app-shell {

@@ -23,75 +23,93 @@ import (
 
 func parseM4ATags(f *os.File) *wavMetadata {
 	meta := &wavMetadata{}
-	var pendingKey string
-
-	// Map MP4 4-letter codes to your struct's field names
-	tagMap := map[string]string{
-		"©nam": "title",
-		"©ART": "artist",
-		"©alb": "album",
-		"©gen": "genre",
-		"©day": "year",
-		"©wrt": "composer", // Note: add to struct if needed
-		"aART": "albumArtist",
-	}
 
 	if _, err := f.Seek(0, 0); err != nil {
 		return nil
 	}
 
-	mp4.ReadBoxStructure(f, func(h *mp4.ReadHandle) (interface{}, error) {
-		boxType := h.BoxInfo.Type.String()
-
-		// 1. If we hit a known tag box, set our pending key
-		if key, ok := tagMap[boxType]; ok {
-			pendingKey = key
-			return nil, nil
-		}
-
-		// 2. If we hit the "data" box, extract the text
-		if boxType == "data" && pendingKey != "" {
-			payload, _, err := h.ReadPayload()
-			if err == nil {
-				if d, ok := payload.(*mp4.Data); ok {
-					val := strings.TrimRight(string(d.Data), "\x00")
-
-					// Map the string to the correct field in your struct
-					switch pendingKey {
-					case "title":
-						meta.title = val
-					case "artist":
-						meta.artist = val
-					case "album":
-						meta.album = val
-					case "genre":
-						meta.genre = val
-					case "albumArtist":
-						meta.albumArtist = val
-					case "year":
-						if y, err := strconv.Atoi(val); err == nil {
-							meta.year = y
-						}
-					}
-				}
-			}
-			pendingKey = ""
-			return nil, nil
-		}
-
-		// 3. Reset pending key for other boxes
-		if pendingKey != "" && boxType != "data" {
-			pendingKey = ""
-		}
-
-		return nil, nil
-	})
-
-	// If we found nothing, return nil
-	if meta.title == "" && meta.artist == "" && meta.album == "" {
+	// Walk to find ilst, then walk its children for tag atoms
+	results, err := mp4.ExtractBoxWithPayload(f, nil,
+		mp4.BoxPath{
+			mp4.StrToBoxType("moov"),
+			mp4.StrToBoxType("udta"),
+			mp4.StrToBoxType("meta"),
+			mp4.StrToBoxType("ilst"),
+		},
+	)
+	if err != nil || len(results) == 0 {
 		return nil
 	}
 
+	// Pre-build BoxType values for comparison (avoid String() which mangles 0xA9 to "(c)")
+	var (
+		typeData = mp4.StrToBoxType("data")
+		typeNam  = mp4.BoxType{0xa9, 'n', 'a', 'm'}
+		typeART  = mp4.BoxType{0xa9, 'A', 'R', 'T'}
+		typeAlb  = mp4.BoxType{0xa9, 'a', 'l', 'b'}
+		typeGen  = mp4.BoxType{0xa9, 'g', 'e', 'n'}
+		typeDay  = mp4.BoxType{0xa9, 'd', 'a', 'y'}
+		typeAART = mp4.StrToBoxType("aART")
+		typeTrkn = mp4.StrToBoxType("trkn")
+		typeDisk = mp4.StrToBoxType("disk")
+	)
+
+	var pendingType mp4.BoxType
+	parentInfo := &results[0].Info
+
+	mp4.ReadBoxStructureFromInternal(f, parentInfo, func(h *mp4.ReadHandle) (interface{}, error) {
+		bt := h.BoxInfo.Type
+
+		// Check if this is a known tag atom (parent of data)
+		switch bt {
+		case typeNam, typeART, typeAlb, typeGen, typeDay, typeAART, typeTrkn, typeDisk:
+			pendingType = bt
+		case typeData:
+			if pendingType != (mp4.BoxType{}) {
+				payload, _, err := h.ReadPayload()
+				if err == nil {
+					if d, ok := payload.(*mp4.Data); ok && len(d.Data) > 0 {
+						val := strings.TrimRight(string(d.Data), "\x00")
+						switch pendingType {
+						case typeNam:
+							meta.title = val
+						case typeART:
+							meta.artist = val
+						case typeAlb:
+							meta.album = val
+						case typeGen:
+							meta.genre = val
+						case typeAART:
+							meta.albumArtist = val
+						case typeDay:
+							if y, err := strconv.Atoi(val); err == nil {
+								meta.year = y
+							}
+						case typeTrkn:
+							// trkn data: 2 reserved + 2 trackNum (BE) + 2 totalTracks (BE)
+							if len(d.Data) >= 6 {
+								meta.trackNumber = int(binary.BigEndian.Uint16(d.Data[2:4]))
+							}
+						case typeDisk:
+							// disk data: 2 reserved + 2 discNum (BE) + 2 totalDiscs (BE)
+							if len(d.Data) >= 6 {
+								meta.discNumber = int(binary.BigEndian.Uint16(d.Data[2:4]))
+							}
+						}
+					}
+				}
+				pendingType = mp4.BoxType{}
+			}
+		default:
+			pendingType = mp4.BoxType{}
+		}
+
+		return h.Expand()
+	})
+
+	if meta.title == "" && meta.artist == "" && meta.album == "" {
+		return nil
+	}
 	return meta
 }
 
@@ -114,10 +132,10 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	// 1. Try the standard library first
 	metadata, err = tag.ReadFrom(f)
 
+	ext := strings.ToLower(filepath.Ext(filePath))
+
 	// 2. If it fails, check if it's an unsupported format we can parse manually
 	if err != nil {
-		ext := strings.ToLower(filepath.Ext(filePath))
-
 		// IMPORTANT: tag.ReadFrom reads bytes, moving the file pointer.
 		// We MUST reset it to the beginning for our custom parsers.
 		if _, seekErr := f.Seek(0, 0); seekErr != nil {
@@ -126,23 +144,46 @@ func ExtractTags(filePath string) (*models.Track, error) {
 
 		switch ext {
 		case ".wav":
-			fallback = parseWavInfo(f) // Must return *wavMetadata
+			fallback = parseWavInfo(f)
 		case ".ape":
-			fallback = parseApeTags(f) // Must return *wavMetadata
+			fallback = parseApeTags(f)
 		case ".m4a", ".mp4":
-			fallback = parseM4ATags(f) // Must return *wavMetadata
+			fallback = parseM4ATags(f)
 		default:
 			slog.Debug("unsupported format, skipping", "path", filePath, "ext", ext, "error", err)
 			return nil, err
 		}
+	} else if ext == ".m4a" || ext == ".mp4" {
+		// tag.ReadFrom succeeds for M4A files (detects ftyp magic bytes)
+		// but often returns empty metadata. Use our custom parser too.
+		if _, seekErr := f.Seek(0, 0); seekErr != nil {
+			return nil, seekErr
+		}
+		if m := parseM4ATags(f); m != nil && m.title != "" {
+			fallback = m
+		}
+		// Re-seek for duration decoder below if needed
+		f.Seek(0, 0)
 	}
 
 	track := &models.Track{
 		Path: filePath,
 	}
 
-	// 3. Map metadata to the track model based on which parser succeeded
-	if metadata != nil {
+	// 3. Map metadata to the track model
+	// Prefer custom fallback (M4A, WAV, APE) over dhowden/tag when available,
+	// because dhowden/tag often returns a non-nil metadata object with empty fields
+	// for formats it detects but can't fully parse.
+	if fallback != nil && fallback.title != "" {
+		track.Title = fallback.title
+		track.Artist = fallback.artist
+		track.AlbumArtist = fallback.albumArtist
+		track.Album = fallback.album
+		track.Genre = fallback.genre
+		track.Year = fallback.year
+		track.TrackNumber = fallback.trackNumber
+		track.DiscNumber = fallback.discNumber
+	} else if metadata != nil {
 		// Standard dhowden/tag path
 		track.Title = metadata.Title()
 		track.Artist = metadata.Artist()
@@ -161,16 +202,6 @@ func ExtractTags(filePath string) (*models.Track, error) {
 		if dn, _ := metadata.Disc(); dn != 0 {
 			track.DiscNumber = dn
 		}
-	} else if fallback != nil {
-		// Custom fallback path (M4A, WAV, APE)
-		track.Title = fallback.title
-		track.Artist = fallback.artist
-		track.AlbumArtist = fallback.albumArtist
-		track.Album = fallback.album
-		track.Genre = fallback.genre
-		track.Year = fallback.year
-		track.TrackNumber = fallback.trackNumber
-		track.DiscNumber = fallback.discNumber
 	}
 
 	// Fallback for files where tag library detects format but returns empty metadata
