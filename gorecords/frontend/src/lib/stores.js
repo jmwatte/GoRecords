@@ -74,35 +74,81 @@ export const musicRoot = writable("");
  */
 export const scanProgress = writable(-1);
 
-/**
- * Active filter stack. Each filter is { field, operator, value }.
- */
-export const activeFilters = writable([]);
+// -------------------------------------------------------------------------
+// Filter Stack (Stepped Filter Wizard)
+// -------------------------------------------------------------------------
 
 /**
- * Add or toggle a facet filter. If a filter on the same field with the same
- * value exists, it is removed. Otherwise it is added.
+ * The ordered filter stack. Each entry is { category, value }.
+ * Order determines breadcrumb display.  Empty array = no filters.
  */
-export function toggleFilter(field, operator, value) {
-  activeFilters.update((filters) => {
-    const idx = filters.findIndex(
-      (f) => f.field === field && f.value === value,
+export const filterStack = writable([]);
+
+/**
+ * Index of the currently highlighted breadcrumb chip (-1 = none).
+ * Left/Right arrow keys move this; Enter re-opens the picker for that
+ * chip's category.
+ */
+export const breadcrumbIndex = writable(-1);
+
+/**
+ * Which picker overlay is currently open, or null if none.
+ * Values: 'genre', 'year', 'artist', 'add', or null.
+ * 'add' means the "pick a category to add" chooser is shown.
+ */
+export const activePicker = writable(null);
+
+/**
+ * Push a new filter onto the end of the stack.
+ * If an identical filter already exists, it is moved to the end
+ * (most recently applied) rather than duplicated.
+ */
+export function pushFilter(category, value) {
+  filterStack.update((stack) => {
+    const dup = stack.findIndex(
+      (f) => f.category === category && f.value === value,
     );
-    if (idx >= 0) {
-      return [...filters.slice(0, idx), ...filters.slice(idx + 1)];
+    if (dup >= 0) {
+      const f = stack[dup];
+      return [...stack.slice(0, dup), ...stack.slice(dup + 1), f];
     }
-    return [...filters, { field, operator, value }];
+    return [...stack, { category, value }];
   });
 }
 
 /**
- * Clear all active filters.
+ * Remove the filter at the given index from the stack.
+ */
+export function popFilter(index) {
+  filterStack.update((stack) => {
+    if (index < 0 || index >= stack.length) return stack;
+    return [...stack.slice(0, index), ...stack.slice(index + 1)];
+  });
+}
+
+/**
+ * Clear the entire filter stack.
  */
 export function clearFilters() {
-  activeFilters.set([]);
+  filterStack.set([]);
+}
+
+/**
+ * Serialise the filter stack to the JSON payload the Go backend expects:
+ * [{ field, op, value }].
+ */
+export function filtersToPayload(filters) {
+  return JSON.stringify(
+    filters.map((f) => ({
+      field: f.category,
+      op: "=",
+      value: f.value,
+    })),
+  );
 }
 
 /**
  * Cached facet data keyed by field name.
+ * Populated by the backend on data refresh.
  */
 export const facetData = writable({});

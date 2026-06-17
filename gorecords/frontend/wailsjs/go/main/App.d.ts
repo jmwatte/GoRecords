@@ -7,6 +7,10 @@ export function GetAlbumTracks(arg1:string):Promise<Array<models.Track>>;
 
 export function GetAlbums(arg1:number,arg2:number):Promise<query.PaginatedAlbums>;
 
+export function GetFacets(arg1:string):Promise<Record<string, Array<query.Facet>>>;
+
+export function GetFilteredAlbums(arg1:string,arg2:number,arg3:number):Promise<query.PaginatedAlbums>;
+
 export function GetRandomAlbum(arg1:string):Promise<string>;
 
 export function Greet(arg1:string):Promise<string>;

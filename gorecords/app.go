@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -47,14 +48,9 @@ func (a *App) GetAlbumTracks(albumFolder string) []*models.Track {
 }
 
 // GetRandomAlbum returns a single random album folder matching the given filters.
-// The frontend calls this when the user presses R, then navigates to that album.
+// The frontend calls this when the user presses R.
 func (a *App) GetRandomAlbum(filtersJSON string) string {
-	// Parse filters from JSON array
-	var filters []query.Filter
-	if filtersJSON != "" && filtersJSON != "[]" {
-		// For now, accept empty filters — the frontend will send active filters
-		// as a JSON array in a future iteration.
-	}
+	filters := parseFiltersJSON(filtersJSON)
 
 	result, err := query.GetRandomAlbum(DB, filters)
 	if err != nil {
@@ -95,8 +91,15 @@ func (a *App) PickFolder(defaultDirectory string) string {
 // GetAlbums returns all unique albums (grouped by album_folder) from the
 // database, with aggregated metadata. Pass an offset and limit for pagination.
 func (a *App) GetAlbums(offset, limit int) *query.PaginatedAlbums {
+	return a.GetFilteredAlbums("[]", offset, limit)
+}
+
+// GetFilteredAlbums returns paginated albums matching the given filters.
+// filtersJSON is a JSON array of { field, op, value } objects.
+func (a *App) GetFilteredAlbums(filtersJSON string, offset, limit int) *query.PaginatedAlbums {
+	filters := parseFiltersJSON(filtersJSON)
 	q := query.AlbumQuery{
-		Filters: []query.Filter{},
+		Filters: filters,
 		SortBy:  "album",
 		SortDir: query.SortAsc,
 		Offset:  offset,
@@ -108,6 +111,35 @@ func (a *App) GetAlbums(offset, limit int) *query.PaginatedAlbums {
 		return &query.PaginatedAlbums{Albums: []query.AlbumResult{}, Total: 0, Offset: offset, Limit: limit}
 	}
 	return result
+}
+
+// GetFacets returns facet counts (distinct values and their occurrence counts)
+// for the given field names, constrained by the current filters (excluding the
+// facet's own field so users see what refinements are still available).
+// filtersJSON is a JSON array of { field, op, value } objects.
+func (a *App) GetFacets(filtersJSON string) map[string][]query.Facet {
+	filters := parseFiltersJSON(filtersJSON)
+	fields := []string{"genre", "year", "artist"}
+	result, err := query.GenerateFacets(DB, fields, filters)
+	if err != nil {
+		slog.Error("failed to get facets", "error", err)
+		return map[string][]query.Facet{}
+	}
+	return result
+}
+
+// parseFiltersJSON unmarshals a JSON array of { field, op, value } into a
+// []query.Filter slice. Returns an empty slice on any parse error.
+func parseFiltersJSON(s string) []query.Filter {
+	if s == "" || s == "[]" {
+		return []query.Filter{}
+	}
+	var filters []query.Filter
+	if err := json.Unmarshal([]byte(s), &filters); err != nil {
+		slog.Warn("failed to parse filters JSON", "json", s, "error", err)
+		return []query.Filter{}
+	}
+	return filters
 }
 
 // wailsProgressEmitter implements scanner.ProgressEmitter using Wails runtime events.

@@ -10,6 +10,14 @@ export function GetAlbums(arg1, arg2) {
   return window['go']['main']['App']['GetAlbums'](arg1, arg2);
 }
 
+export function GetFacets(arg1) {
+  return window['go']['main']['App']['GetFacets'](arg1);
+}
+
+export function GetFilteredAlbums(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetFilteredAlbums'](arg1, arg2, arg3);
+}
+
 export function GetRandomAlbum(arg1) {
   return window['go']['main']['App']['GetRandomAlbum'](arg1);
 }

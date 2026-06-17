@@ -2,6 +2,7 @@
   import { musicRoot, scanProgress, currentView } from './stores.js';
   import { ScanMusic, PickFolder } from '../../wailsjs/go/main/App.js';
   import { showToast } from './toastStore.js';
+  import { BINDINGS, renderShortcut } from '../lib/keyboard.js';
 
   let loading = false;
 
@@ -69,6 +70,22 @@
       {loading ? 'Scanning…' : 'Rescan Library'}
     </button>
     <p class="hint">Scans the folder for audio files, extracts metadata, and updates the database.</p>
+  </div>
+
+  <div class="setting-group">
+    <h3 class="settings-subtitle">Keyboard Shortcuts</h3>
+    <div class="shortcut-list">
+      {#each BINDINGS as binding}
+        <div class="shortcut-row">
+          <span class="shortcut-label">{binding.label}</span>
+          <span class="shortcut-keys">
+            {#each renderShortcut(binding.shortcut) as part}
+              {#if part.kbd}<kbd class="shortcut-key">{part.text}</kbd>{:else}<span class="shortcut-plus">{part.text}</span>{/if}
+            {/each}
+          </span>
+        </div>
+      {/each}
+    </div>
   </div>
 
   {#if $scanProgress >= 0}
@@ -177,6 +194,57 @@
     margin: 0.5rem 0 0;
     font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.35);
+  }
+
+  .settings-subtitle {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .shortcut-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  }
+
+  .shortcut-label {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .shortcut-keys {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+  }
+
+  .shortcut-key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.4rem;
+    height: 1.4rem;
+    padding: 0 0.3rem;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 0.7rem;
+    color: white;
+  }
+
+  .shortcut-plus {
+    color: rgba(255, 255, 255, 0.3);
+    font-size: 0.7rem;
   }
 
   .progress-bar-wrap {

@@ -1,15 +1,17 @@
 <script>
   import { onMount } from 'svelte';
-  import { initKeyboard, KEY, lastKey } from './lib/keyboard.js';
+  import { initKeyboard, lastAction } from './lib/keyboard.js';
   import {
-    viewMode, currentIndex, currentView, isVisualMode,
-    isAlbumTracksView, toggleViewMode, openAlbum, closeAlbum,
-    activeAlbumFolder, scanProgress
-  } from './lib/stores.js';
-  import { GetAlbumTracks, GetRandomAlbum, GetAlbums } from '../wailsjs/go/main/App.js';
-  import Settings from './lib/Settings.svelte';
-  import FacetSidebar from './lib/FacetSidebar.svelte';
-  import Toasts from './lib/Toasts.svelte';
+      viewMode, currentIndex, currentView, isVisualMode,
+      isAlbumTracksView, toggleViewMode, openAlbum, closeAlbum,
+      activeAlbumFolder, scanProgress,
+      filterStack, breadcrumbIndex, activePicker,
+      pushFilter, popFilter, clearFilters, filtersToPayload, facetData
+    } from './lib/stores.js';
+    import { GetAlbumTracks, GetRandomAlbum, GetAlbums, GetFilteredAlbums, GetFacets } from '../wailsjs/go/main/App.js';
+    import Settings from './lib/Settings.svelte';
+    import FilterPicker from './lib/FilterPicker.svelte';
+    import Toasts from './lib/Toasts.svelte';
   import { showToast } from './lib/toastStore.js';
 
   let cleanup;
@@ -50,22 +52,27 @@
 
   onMount(() => {
     cleanup = initKeyboard();
-    loadAlbums();
+    refreshData();
     return () => {
       if (cleanup) cleanup();
     };
   });
 
-  // Fetch albums from the backend
-  async function loadAlbums() {
+  // Fetch albums and facets from the backend
+  async function refreshData() {
     loadingAlbums = true;
+    const payload = filtersToPayload($filterStack);
     try {
-      const result = await GetAlbums(0, 1000);
-      albums = result.albums || [];
-      totalAlbums = albums.length;
+      const [albumResult, facetResult] = await Promise.all([
+        GetFilteredAlbums(payload, 0, 1000),
+        GetFacets(payload),
+      ]);
+      albums = albumResult.albums || [];
+      totalAlbums = albumResult.total || albums.length;
+      facetData.set(facetResult || {});
     } catch (err) {
-      console.error('Failed to load albums:', err);
-      showToast('Failed to load album library', 'error');
+      console.error('Failed to load data:', err);
+      showToast('Failed to load data', 'error');
       albums = [];
       totalAlbums = 0;
     } finally {
@@ -73,16 +80,24 @@
     }
   }
 
-  // Reload albums when scan completes and we have none
-  $: if (cleanup && $scanProgress === -1 && albums.length === 0) {
-    loadAlbums();
+  // Reload albums and facets when scan completes
+  $: if (cleanup && $scanProgress === -1) {
+    refreshData();
   }
 
-  // Subscribe to keyboard events for navigation
-  $: {
-    if ($lastKey) {
-      handleKey($lastKey);
+  // Reload albums and facets when filters change
+  let prevFilterLen = 0;
+  $: if (cleanup && $filterStack) {
+    if ($filterStack.length !== prevFilterLen) {
+      prevFilterLen = $filterStack.length;
+      refreshData();
     }
+  }
+
+  // Subscribe to matched keyboard actions for navigation.
+  // $lastAction.seq changes on every keydown so this always fires.
+  $: if ($lastAction.action) {
+    handleAction($lastAction.action);
   }
 
   // Auto-scroll to keep the selected track visible
@@ -106,71 +121,85 @@
     }
   }
 
-  function handleKey(e) {
+  function handleAction(action) {
     // Global shortcuts (work in any view)
-    if (e.key === KEY.REWIND) {
-      handleRewind();
-      e.stopPropagation();
-      return;
+    switch (action) {
+      case 'rewind':
+        handleRewind();
+        return;
+      case 'play_pause':
+        handlePlayPause();
+        return;
+      case 'next_track':
+        nextTrack();
+        return;
+      case 'prev_track':
+        prevTrack();
+        return;
     }
 
     if ($isAlbumTracksView) {
       // Navigation within album track list
-      switch (e.key) {
-        case KEY.ARROW_UP:
+      switch (action) {
+        case 'nav_up':
           $currentIndex = Math.max(0, $currentIndex - 1);
-          e.stopPropagation();
           break;
-        case KEY.ARROW_DOWN:
+        case 'nav_down':
           $currentIndex = Math.min(tracks.length - 1, $currentIndex + 1);
-          e.stopPropagation();
           break;
-        case KEY.ARROW_LEFT:
-        case KEY.ESCAPE:
-        case KEY.BACK:
+        case 'nav_left':
+        case 'close_view':
+        case 'go_back':
           handleCloseAlbum();
-          e.stopPropagation();
           break;
-        case KEY.ENTER:
+        case 'open_album':
           handlePlaySelected();
-          e.stopPropagation();
           break;
       }
       return;
     }
 
     // Crate-level navigation
-    switch (e.key) {
-      case KEY.ARROW_UP:
+    switch (action) {
+      case 'nav_up':
         $currentIndex = Math.max(0, $currentIndex - 1);
-        e.stopPropagation();
+        $breadcrumbIndex = -1;
         break;
-      case KEY.ARROW_DOWN:
+      case 'nav_down':
         $currentIndex = Math.min(totalAlbums - 1, $currentIndex + 1);
-        e.stopPropagation();
+        $breadcrumbIndex = -1;
         break;
-      case KEY.ARROW_RIGHT:
-      case KEY.ENTER:
-        if (albums[$currentIndex]) {
+      case 'breadcrumb_prev':
+        if ($filterStack.length > 0) {
+          $breadcrumbIndex = Math.max(0, ($breadcrumbIndex >= 0 ? $breadcrumbIndex : $filterStack.length) - 1);
+        }
+        break;
+      case 'breadcrumb_next':
+        if ($filterStack.length > 0) {
+          $breadcrumbIndex = Math.min($filterStack.length - 1, ($breadcrumbIndex >= 0 ? $breadcrumbIndex : -1) + 1);
+        }
+        break;
+      case 'open_album':
+        if ($breadcrumbIndex >= 0 && $breadcrumbIndex < $filterStack.length) {
+          const cat = $filterStack[$breadcrumbIndex].category;
+          popFilter($breadcrumbIndex);
+          $breadcrumbIndex = -1;
+          $activePicker = cat;
+        } else if (albums[$currentIndex]) {
           handleOpenAlbum(albums[$currentIndex].albumFolder);
         }
-        e.stopPropagation();
         break;
-      case KEY.LAYOUT_GRID:
+      case 'visual_mode':
         if (!$isVisualMode) toggleViewMode();
-        e.stopPropagation();
         break;
-      case KEY.LAYOUT_LIST:
+      case 'list_mode':
         if ($isVisualMode) toggleViewMode();
-        e.stopPropagation();
         break;
-      case KEY.SETTINGS:
+      case 'settings':
         $currentView = $currentView === 'settings' ? 'crate' : 'settings';
-        e.stopPropagation();
         break;
-      case KEY.RANDOM_ALBUM:
+      case 'random_album':
         handleRandomAlbum();
-        e.stopPropagation();
         break;
     }
   }
@@ -325,14 +354,20 @@
     }
   }
 
-  // Pick a random album and navigate to its track list
+  // Pick a random album and select it in the crate view (no navigation)
   async function handleRandomAlbum() {
     if ($currentView !== 'crate') return;
     try {
-      const albumFolder = await GetRandomAlbum('');
+      const payload = filtersToPayload($filterStack);
+      const albumFolder = await GetRandomAlbum(payload);
       if (albumFolder) {
-        await handleOpenAlbum(albumFolder);
-        showToast('Playing random album', 'info', 2000);
+        const idx = albums.findIndex(a => a.albumFolder === albumFolder);
+        if (idx >= 0) {
+          $currentIndex = idx;
+          showToast('Random album selected', 'info', 2000);
+        } else {
+          showToast('Random album not in current view', 'warn', 2000);
+        }
       } else {
         showToast('No albums found', 'warn', 2000);
       }
@@ -377,8 +412,44 @@
 <div class="app-shell">
   {#if $currentView === 'crate'}
     <div class="crate-layout">
-      <FacetSidebar />
       <div class="crate-content">
+        <!-- Breadcrumb bar: filter stack chips + add button -->
+        <div class="breadcrumb-bar">
+          {#each $filterStack as filter, i}
+            <button
+              class="breadcrumb-chip"
+              class:breadcrumb-active={i === $breadcrumbIndex}
+              on:click={() => {
+                $breadcrumbIndex = i;
+              }}
+              on:dblclick={() => {
+                const cat = filter.category;
+                popFilter(i);
+                $breadcrumbIndex = -1;
+                $activePicker = cat;
+              }}
+            >
+              <span class="breadcrumb-label">{filter.category}:</span>
+              <span class="breadcrumb-value">{filter.value}</span>
+              <span
+                class="breadcrumb-remove"
+                on:click|stopPropagation={() => popFilter(i)}
+              >✕</span>
+            </button>
+          {/each}
+          <button
+            class="breadcrumb-add"
+            on:click={() => { $activePicker = 'add'; $breadcrumbIndex = -1; }}
+            title="Add filter"
+          >+</button>
+          {#if $filterStack.length > 0}
+            <button
+              class="breadcrumb-clear"
+              on:click={() => { clearFilters(); $breadcrumbIndex = -1; }}
+            >Clear all</button>
+          {/if}
+        </div>
+
         {#if $isVisualMode}
           <div class="visual-crate">
             <div class="album-art-frame">
@@ -388,10 +459,13 @@
                   src={audioSrc(albums[$currentIndex].coverPath)}
                   alt={albums[$currentIndex].album}
                 />
-              {:else}
-                <div class="album-art-placeholder">
-                  <span class="placeholder-text">{albums[$currentIndex]?.album?.[0] ?? '?'}</span>
-                </div>
+             {:else}
+  <img
+    class="album-art"
+    src="/no_results.png"
+    alt={albums[$currentIndex]?.album ?? 'Album'}
+  />
+
               {/if}
             </div>
             <div class="album-meta">
@@ -476,6 +550,31 @@
     </div>
   {:else if $currentView === 'settings'}
     <Settings />
+  {/if}
+
+  <!-- Filter Picker overlays -->
+  {#if $activePicker === 'add'}
+    <!-- Category chooser when user clicks + -->
+    <div class="picker-overlay">
+      <div class="picker-panel">
+        <div class="picker-header">
+          <h3 class="picker-title">Pick a category</h3>
+          <button class="picker-close" on:click={() => activePicker.set(null)}>✕</button>
+        </div>
+        <div class="picker-body">
+          {#each ['genre', 'year', 'artist'] as cat}
+            <button
+              class="picker-item"
+              on:click={() => $activePicker = cat}
+            >
+              <span class="picker-item-value" style="text-transform:capitalize">{cat}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {:else if $activePicker}
+    <FilterPicker category={$activePicker} />
   {/if}
 
   <!-- Fixed Now Playing bar -->
@@ -925,4 +1024,175 @@
   .np-volume-slider {
     flex: 1;
   }
+
+  /* Breadcrumb filter chips */
+  .breadcrumb-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .breadcrumb-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    color: white;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+
+  .breadcrumb-chip:hover {
+    background: rgba(70, 130, 200, 0.2);
+    border-color: rgba(70, 130, 200, 0.4);
+  }
+
+  .breadcrumb-active {
+    background: rgba(70, 130, 200, 0.3) !important;
+    border-color: rgba(70, 130, 200, 0.7) !important;
+  }
+
+  .breadcrumb-label {
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    font-size: 0.65rem;
+  }
+
+  .breadcrumb-value {
+    font-weight: 500;
+  }
+
+  .breadcrumb-remove {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    padding: 0 0 0 0.15rem;
+    font-size: 0.7rem;
+    line-height: 1;
+  }
+
+  .breadcrumb-remove:hover {
+    color: white;
+  }
+
+  .breadcrumb-add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px dashed rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 1rem;
+    cursor: pointer;
+  }
+
+  .breadcrumb-add:hover {
+    background: rgba(70, 130, 200, 0.2);
+    border-color: rgba(70, 130, 200, 0.4);
+    color: white;
+  }
+
+  .breadcrumb-clear {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.4);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    cursor: pointer;
+    margin-left: auto;
+  }
+
+  .breadcrumb-clear:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: white;
+  }
+
+  /* Picker overlay shared styles */
+  .picker-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  .picker-panel {
+    background: #1a1a2e;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    min-width: 320px;
+    max-width: 480px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .picker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .picker-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .picker-close {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0.2rem;
+  }
+
+  .picker-close:hover {
+    color: white;
+  }
+
+  .picker-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem;
+  }
+
+  .picker-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .picker-item:hover {
+    background: rgba(70, 130, 200, 0.2);
+  }
+
 </style>

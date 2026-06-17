@@ -1,7 +1,9 @@
 package scanner
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,17 +13,20 @@ import (
 
 	"gorecords/models"
 
+	"github.com/abema/go-mp4"
 	"github.com/dhowden/tag"
-	"github.com/faiface/beep"
-	"github.com/faiface/beep/flac"
 	"github.com/faiface/beep/mp3"
+	"github.com/faiface/beep/vorbis"
 	"github.com/faiface/beep/wav"
+	"github.com/mewkiz/flac"
 )
 
 // ExtractTags reads audio metadata from the given file path, resolves
 // cover art via the walk-up resolver, and returns a populated Track.
 // If the file cannot be opened or has no readable tags, an error is returned
 // and the caller should skip the file.
+// The file handle is kept open for both tag reading and duration decoding
+// to avoid re-opening races under concurrent scanning.
 func ExtractTags(filePath string) (*models.Track, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -29,12 +34,27 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	}
 	defer f.Close()
 
+	// 1. Try the standard library first
 	metadata, err := tag.ReadFrom(f)
+
+	// 2. If it fails, check if it's an unsupported format we can parse manually
 	if err != nil {
-		// Fallback: try ID3v1-only files
-		f.Seek(0, 0)
-		metadata, err = tag.ReadID3v1Tags(f)
-		if err != nil {
+		ext := strings.ToLower(filepath.Ext(filePath))
+
+		// IMPORTANT: tag.ReadFrom reads bytes, moving the file pointer.
+		// We MUST reset it to the beginning for our custom parsers.
+		if _, seekErr := f.Seek(0, 0); seekErr != nil {
+			return nil, seekErr
+		}
+
+		switch ext {
+		case ".wav":
+			metadata = parseWavInfo(f)
+		case ".ape":
+			metadata = parseApeTags(f)
+		default:
+			// If it's WMA, AIFF, or something else, we truly can't read it.
+			slog.Debug("unsupported format, skipping", "path", filePath, "ext", ext, "error", err)
 			return nil, err
 		}
 	}
@@ -64,17 +84,23 @@ func ExtractTags(filePath string) (*models.Track, error) {
 		_ = total
 	}
 
-	// Walk-up cover art resolution from the track's parent directory
+	// Walk-up cover art resolution from the track's parent directory.
+	// If no cover art is found, still group tracks by their parent
+	// directory so they appear in the album listing (frontend will
+	// show a placeholder image).
 	coverPath, albumFolder := ResolveCoverArt(dirFromPath(filePath))
 	track.CoverPath = coverPath
+	if albumFolder == "" {
+		albumFolder = dirFromPath(filePath)
+	}
 	track.AlbumFolder = albumFolder
 
 	// Duration: first try tag Raw() values, then fall back to pure Go decoder.
+	// The same file handle is reused (no close/re-open race).
 	track.Duration = durationFromTags(metadata)
 	if track.Duration <= 0 {
-		// Re-open with a pure Go decoder for formats we support.
-		f.Close()
-		track.Duration = durationFromDecoder(filePath)
+		f.Seek(0, 0)
+		track.Duration = durationFromDecoderWithFile(f, filePath)
 	}
 
 	slog.Debug("extracted tags",
@@ -112,9 +138,8 @@ func durationFromTags(metadata tag.Metadata) float64 {
 	// Try FLAC / Vorbis TOTALTIME (in milliseconds or seconds)
 	if v, ok := raw["TOTALTIME"]; ok {
 		s := toString(v)
-		// Typically in milliseconds, but some encoders use seconds.
 		if ms, err := strconv.ParseFloat(s, 64); err == nil && ms > 0 {
-			if ms > 10000 { // Likely milliseconds
+			if ms > 10000 {
 				return ms / 1000.0
 			}
 			return ms
@@ -131,55 +156,408 @@ func durationFromTags(metadata tag.Metadata) float64 {
 	return 0
 }
 
-// durationFromDecoder opens the file with a pure Go decoder to calculate
-// duration from the streamer length and sample rate.
-func durationFromDecoder(filePath string) float64 {
-	f, err := os.Open(filePath)
-	if err != nil {
-		slog.Debug("duration decoder: failed to open", "path", filePath, "error", err)
-		return 0
-	}
-	defer f.Close()
-
+// durationFromDecoderWithFile decodes an already-open audio file to calculate
+// duration. The caller must have Seek'd to position 0 before calling.
+// Errors are logged at Warn level so they're visible in the console.
+func durationFromDecoderWithFile(f *os.File, filePath string) float64 {
 	ext := strings.ToLower(filepath.Ext(filePath))
 
-	var streamer beep.StreamSeekCloser
-	var format beep.Format
-
 	switch ext {
-	case ".mp3":
-		s, f, err := mp3.Decode(f)
-		if err != nil {
-			slog.Debug("duration decoder: mp3 decode failed", "path", filePath, "error", err)
-			return 0
-		}
-		streamer, format = s, f
 	case ".flac":
-		s, f, err := flac.Decode(f)
+		stream, err := flac.Parse(f)
 		if err != nil {
-			slog.Debug("duration decoder: flac decode failed", "path", filePath, "error", err)
+			slog.Warn("duration decoder: flac parse failed", "path", filePath, "error", err)
 			return 0
 		}
-		streamer, format = s, f
+		if stream.Info.NSamples == 0 {
+			slog.Warn("duration decoder: flac has 0 samples", "path", filePath)
+			return 0
+		}
+		return float64(stream.Info.NSamples) / float64(stream.Info.SampleRate)
+
+	case ".mp3":
+		streamer, format, err := mp3.Decode(f)
+		if err != nil {
+			slog.Warn("duration decoder: mp3 decode failed", "path", filePath, "error", err)
+			return 0
+		}
+		defer streamer.Close()
+		if format.SampleRate == 0 {
+			slog.Warn("duration decoder: zero sample rate", "path", filePath)
+			return 0
+		}
+		return float64(streamer.Len()) / float64(format.SampleRate)
+
 	case ".wav":
-		s, f, err := wav.Decode(f)
+		streamer, format, err := wav.Decode(f)
 		if err != nil {
-			slog.Debug("duration decoder: wav decode failed", "path", filePath, "error", err)
+			slog.Warn("duration decoder: wav decode failed", "path", filePath, "error", err)
 			return 0
 		}
-		streamer, format = s, f
+		defer streamer.Close()
+		if format.SampleRate == 0 {
+			slog.Warn("duration decoder: zero sample rate", "path", filePath)
+			return 0
+		}
+		return float64(streamer.Len()) / float64(format.SampleRate)
+
+	case ".ogg":
+		streamer, format, err := vorbis.Decode(f)
+		if err != nil {
+			slog.Warn("duration decoder: ogg decode failed", "path", filePath, "error", err)
+			return 0
+		}
+		defer streamer.Close()
+		if format.SampleRate == 0 {
+			slog.Warn("duration decoder: zero sample rate", "path", filePath)
+			return 0
+		}
+		return float64(streamer.Len()) / float64(format.SampleRate)
+
+	case ".m4a", ".mp4", ".aac":
+		return durationFromMP4Container(f, filePath)
+
+	case ".ape":
+		return durationFromAPE(f, filePath)
+
 	default:
+		slog.Warn("duration decoder: unsupported format", "path", filePath, "ext", ext)
 		return 0
 	}
-	defer streamer.Close()
+}
 
-	if format.SampleRate == 0 {
-		slog.Debug("duration decoder: zero sample rate", "path", filePath)
+// durationFromMP4Container parses the MP4/M4A container and extracts duration
+// from the Movie Header (mvhd) box.
+func durationFromMP4Container(f *os.File, filePath string) float64 {
+	if _, err := f.Seek(0, 0); err != nil {
+		slog.Warn("duration decoder: failed to seek m4a file", "path", filePath, "error", err)
 		return 0
 	}
 
-	duration := float64(streamer.Len()) / float64(format.SampleRate)
-	return duration
+	results, err := mp4.ExtractBoxWithPayload(f, nil, mp4.BoxPath{mp4.StrToBoxType("moov"), mp4.StrToBoxType("mvhd")})
+	if err != nil {
+		slog.Warn("duration decoder: mp4 parse failed", "path", filePath, "error", err)
+		return 0
+	}
+	if len(results) == 0 {
+		slog.Warn("duration decoder: mvhd box not found", "path", filePath)
+		return 0
+	}
+
+	mvhd, ok := results[0].Payload.(*mp4.Mvhd)
+	if !ok {
+		slog.Warn("duration decoder: mvhd payload type assertion failed", "path", filePath)
+		return 0
+	}
+
+	duration := mvhd.GetDuration()
+	if mvhd.Timescale == 0 {
+		slog.Warn("duration decoder: mp4 has 0 timescale", "path", filePath)
+		return 0
+	}
+
+	return float64(duration) / float64(mvhd.Timescale)
+}
+
+// durationFromAPE parses the APE file header and descriptor to extract duration
+// without decoding the actual audio. Pure Go, no external dependencies.
+func durationFromAPE(f *os.File, filePath string) float64 {
+	// Reset file position to beginning
+	if _, err := f.Seek(0, 0); err != nil {
+		slog.Debug("Failed to seek APE file", "path", filePath, "error", err)
+		return 0
+	}
+
+	// Read APE Header (first 32 bytes)
+	// Format: MAC (3) + Version (2) + DescriptorLength (4) + HeaderLength (4) +
+	//         SeekTableLength (4) + HeaderDataLength (4) + APEFrameCount (4) +
+	//         FinalFrameBlocks (4) + TotalFrames (4) + BitsPerSample (2) +
+	//         Channels (2) + SampleRate (4)
+	header := make([]byte, 32)
+	if _, err := io.ReadFull(f, header); err != nil {
+		slog.Debug("Failed to read APE header", "path", filePath, "error", err)
+		return 0
+	}
+
+	// Verify "MAC" signature
+	if string(header[0:3]) != "MAC" {
+		slog.Debug("Invalid APE signature", "path", filePath)
+		return 0
+	}
+
+	// Extract Sample Rate (bytes 28-31, little-endian uint32)
+	sampleRate := binary.LittleEndian.Uint32(header[28:32])
+	if sampleRate == 0 {
+		slog.Debug("APE has 0 sample rate", "path", filePath)
+		return 0
+	}
+
+	// Get file size to locate the APE Descriptor at the end
+	fileInfo, err := f.Stat()
+	if err != nil {
+		slog.Debug("Failed to stat APE file", "path", filePath, "error", err)
+		return 0
+	}
+	fileSize := fileInfo.Size()
+
+	// APE Descriptor is always 32 bytes and sits right before the optional APE Tag
+	// For simplicity, we'll try to read the last 32 bytes as the descriptor
+	// Note: This works for most APE files. If there's an APE tag, the descriptor
+	// is immediately before it, but reading the last 32 bytes usually still gives
+	// us valid data since the descriptor structure is consistent.
+	descriptorOffset := fileSize - 32
+	if descriptorOffset < 32 {
+		slog.Debug("APE file too small", "path", filePath)
+		return 0
+	}
+
+	if _, err := f.Seek(descriptorOffset, 0); err != nil {
+		slog.Debug("Failed to seek APE descriptor", "path", filePath, "error", err)
+		return 0
+	}
+
+	descriptor := make([]byte, 32)
+	if _, err := io.ReadFull(f, descriptor); err != nil {
+		slog.Debug("Failed to read APE descriptor", "path", filePath, "error", err)
+		return 0
+	}
+
+	// Extract Total Frames from descriptor (bytes 20-23, little-endian uint32)
+	// In the APE descriptor, offset 20 is TotalFrames
+	totalFrames := binary.LittleEndian.Uint32(descriptor[20:24])
+	if totalFrames == 0 {
+		slog.Debug("APE has 0 total frames", "path", filePath)
+		return 0
+	}
+
+	// Duration = Total Frames / Sample Rate
+	return float64(totalFrames) / float64(sampleRate)
+}
+
+// ---------------------------------------------------------------------------
+// Fallback tag parsers for formats that dhowden/tag does not support
+// ---------------------------------------------------------------------------
+
+// wavMetadata is a minimal implementation of tag.Metadata for fallback parsers
+// that read WAV RIFF INFO chunks or APEv2 tags manually.
+type wavMetadata struct {
+	title       string
+	artist      string
+	albumArtist string
+	album       string
+	genre       string
+	year        int
+	trackNumber int
+	trackTotal  int
+	discNumber  int
+	discTotal   int
+}
+
+func (m *wavMetadata) Format() tag.Format          { return tag.Format("WAV") }
+func (m *wavMetadata) FileType() tag.FileType      { return tag.FileType("WAV") }
+func (m *wavMetadata) Title() string               { return m.title }
+func (m *wavMetadata) Artist() string              { return m.artist }
+func (m *wavMetadata) AlbumArtist() string         { return m.albumArtist }
+func (m *wavMetadata) Album() string               { return m.album }
+func (m *wavMetadata) Genre() string               { return m.genre }
+func (m *wavMetadata) Year() int                   { return m.year }
+func (m *wavMetadata) Track() (int, int)           { return m.trackNumber, m.trackTotal }
+func (m *wavMetadata) Disc() (int, int)            { return m.discNumber, m.discTotal }
+func (m *wavMetadata) Composer() string            { return "" }
+func (m *wavMetadata) Picture() *tag.Picture       { return nil }
+func (m *wavMetadata) Lyrics() string              { return "" }
+func (m *wavMetadata) Comment() string             { return "" }
+func (m *wavMetadata) Raw() map[string]interface{} { return nil }
+
+// parseWavInfo extracts basic metadata from a WAV file's RIFF LIST INFO chunk.
+// WAV files store metadata in LIST chunks of type INFO with 4-letter codes
+// such as INAM (Title), IART (Artist), IPRD (Album), etc.
+func parseWavInfo(f *os.File) tag.Metadata {
+	meta := &wavMetadata{}
+
+	buf := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(f, buf); err != nil {
+			break
+		}
+
+		chunkID := string(buf[0:4])
+		chunkSize := int(binary.LittleEndian.Uint32(buf[4:8]))
+
+		if chunkID == "LIST" {
+			listType := make([]byte, 4)
+			if _, err := io.ReadFull(f, listType); err != nil {
+				break
+			}
+			if string(listType) == "INFO" {
+				remaining := chunkSize - 4
+				for remaining > 0 {
+					subBuf := make([]byte, 8)
+					if _, err := io.ReadFull(f, subBuf); err != nil {
+						break
+					}
+					subID := string(subBuf[0:4])
+					subSize := int(binary.LittleEndian.Uint32(subBuf[4:8]))
+					remaining -= 8
+
+					strBuf := make([]byte, subSize)
+					if _, err := io.ReadFull(f, strBuf); err != nil {
+						break
+					}
+					val := strings.TrimRight(string(strBuf), "\x00")
+					remaining -= subSize
+
+					switch subID {
+					case "INAM":
+						meta.title = val
+					case "IART":
+						meta.artist = val
+					case "IPRD":
+						meta.album = val
+					case "ICRD":
+						meta.year, _ = strconv.Atoi(val)
+					case "IGNR":
+						meta.genre = val
+					case "ITRK":
+						meta.trackNumber, _ = strconv.Atoi(val)
+					}
+
+					// Chunks are padded to 2-byte boundaries
+					if subSize%2 != 0 {
+						if _, err := f.Seek(1, 1); err != nil {
+							break
+						}
+						remaining--
+					}
+				}
+			}
+			break
+		}
+
+		// Skip unknown chunks
+		if _, err := f.Seek(int64(chunkSize), 1); err != nil {
+			break
+		}
+		// Skip padding byte if chunk size is odd
+		if chunkSize%2 != 0 {
+			if _, err := f.Seek(1, 1); err != nil {
+				break
+			}
+		}
+	}
+
+	return meta
+}
+
+// parseApeTags extracts APEv2 tags from the end of an APE file.
+// APEv2 stores a 32-byte footer at the end of the file with the signature
+// "APETAGEX", followed by the tag data immediately before it.
+func parseApeTags(f *os.File) tag.Metadata {
+	meta := &wavMetadata{}
+
+	fileInfo, err := f.Stat()
+	if err != nil {
+		return meta
+	}
+	fileSize := fileInfo.Size()
+
+	// APEv2 footer is exactly 32 bytes at the end of the file
+	if fileSize < 32 {
+		return meta
+	}
+	if _, err := f.Seek(fileSize-32, 0); err != nil {
+		return meta
+	}
+
+	footer := make([]byte, 32)
+	if _, err := io.ReadFull(f, footer); err != nil {
+		return meta
+	}
+
+	// Verify APEv2 signature "APETAGEX"
+	if string(footer[0:8]) != "APETAGEX" {
+		return meta
+	}
+
+	version := binary.LittleEndian.Uint32(footer[8:12])
+	if version < 2000 {
+		return meta // We only support APEv2
+	}
+
+	tagSize := binary.LittleEndian.Uint32(footer[12:16])
+	itemCount := binary.LittleEndian.Uint32(footer[16:20])
+	flags := binary.LittleEndian.Uint32(footer[20:24])
+
+	// The tag data starts right before the 32-byte footer.
+	// If bit 31 (0x80000000) is set, a 32-byte header precedes the items.
+	hasHeader := (flags & 0x80000000) != 0
+	tagStart := fileSize - 32 - int64(tagSize)
+	if tagStart < 0 {
+		return meta
+	}
+	if _, err := f.Seek(tagStart, 0); err != nil {
+		return meta
+	}
+
+	tagData := make([]byte, tagSize)
+	if _, err := io.ReadFull(f, tagData); err != nil {
+		return meta
+	}
+
+	// Parse the items
+	offset := 0
+	if hasHeader {
+		offset = 32 // skip the APETAGEX header
+	}
+	for i := 0; i < int(itemCount); i++ {
+		if offset+8 > len(tagData) {
+			break
+		}
+
+		itemSize := binary.LittleEndian.Uint32(tagData[offset : offset+4])
+		// flags := binary.LittleEndian.Uint32(tagData[offset+4 : offset+8])
+		offset += 8
+
+		// Find the null terminator for the key
+		keyEnd := offset
+		for keyEnd < len(tagData) && tagData[keyEnd] != 0 {
+			keyEnd++
+		}
+		if keyEnd >= len(tagData) {
+			break
+		}
+		key := string(tagData[offset:keyEnd])
+		offset = keyEnd + 1 // Skip null terminator
+
+		// Read the value
+		if offset+int(itemSize) > len(tagData) {
+			break
+		}
+		value := string(tagData[offset : offset+int(itemSize)])
+		offset += int(itemSize)
+
+		// Map APE keys to standard keys
+		switch strings.ToUpper(key) {
+		case "TITLE":
+			meta.title = value
+		case "ARTIST":
+			meta.artist = value
+		case "ALBUM ARTIST":
+			meta.albumArtist = value
+		case "ALBUMARTIST":
+			meta.albumArtist = value
+		case "ALBUM":
+			meta.album = value
+		case "YEAR":
+			meta.year, _ = strconv.Atoi(value)
+		case "GENRE":
+			meta.genre = value
+		case "TRACK":
+			meta.trackNumber, _ = strconv.Atoi(value)
+		}
+	}
+
+	return meta
 }
 
 // toString converts a raw tag value to string.

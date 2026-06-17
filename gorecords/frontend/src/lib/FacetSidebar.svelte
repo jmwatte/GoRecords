@@ -8,13 +8,13 @@
     { field: 'artist', label: 'Artist' },
   ];
 
-  // Check if a value is currently active
+  // Check if a value is currently active (filter stack uses { category, value })
   function isActive(field, value) {
-    return $activeFilters.some((f) => f.field === field && f.value === value);
+    return $activeFilters.some((f) => f.category === field && f.value === value);
   }
 
   function handleToggle(field, value) {
-    toggleFilter(field, '=', value);
+    toggleFilter(field, value);
   }
 </script>
 
