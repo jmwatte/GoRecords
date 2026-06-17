@@ -65,6 +65,22 @@
     // Breadcrumb navigation mode — toggled by B (Shift+b)
     // Using a store so Svelte tracks changes from inside handleAction()
     const breadcrumbMode = writable(false);
+
+    // Picker edit state
+    let pickerInitialValue = "";
+    let pickerEditIndex = -1;
+
+    // Shared: open the value picker for a breadcrumb chip at index i
+    function editBreadcrumb(i) {
+        const chip = $filterStack[i];
+        if (!chip) return;
+        pickerInitialValue = chip.value;
+        pickerEditIndex = i;
+        popFilter(i);
+        $breadcrumbIndex = -1;
+        $breadcrumbMode = false;
+        $activePicker = chip.category;
+    }
     function handleCatPicker(e) {
         // Only handle keys when the add picker is open
         if ($activePicker !== "add") return;
@@ -97,8 +113,6 @@
 
     // Track list — populated via Wails binding when album is opened
     let tracks = [];
-    let pickerInitialValue = "";
-    let pickerEditIndex = -1;
     let loadingTracks = false;
 
     // Cached index to restore on Escape
@@ -321,18 +335,22 @@
                 $breadcrumbMode = false;
                 break;
             case "open_album":
-                // Enter: when in breadcrumb mode and crumb highlighted, open its picker
                 if (
-                    $breadcrumbMode &&
                     $breadcrumbIndex >= 0 &&
                     $breadcrumbIndex < $filterStack.length
                 ) {
-                    const cat = $filterStack[$breadcrumbIndex].category;
-                    popFilter($breadcrumbIndex);
-                    $breadcrumbIndex = -1;
-                    $breadcrumbMode = false;
-                    $activePicker = cat;
+                    // Only run if no breadcrumb button has focus
+                    // (a focused button's on:keydown handles its own Enter)
+                    if (
+                        !document.activeElement?.classList?.contains(
+                            "breadcrumb-chip",
+                        )
+                    ) {
+                        editBreadcrumb($breadcrumbIndex);
+                    }
                 } else if (albums[$currentIndex]) {
+                    pickerInitialValue = "";
+                    pickerEditIndex = -1;
                     handleOpenAlbum(albums[$currentIndex].albumFolder);
                     $breadcrumbMode = false;
                 }
@@ -612,16 +630,15 @@
                             class:breadcrumb-active={i === $breadcrumbIndex}
                             on:click={() => {
                                 $breadcrumbIndex = i;
-                                $breadcrumbMode = true; // <--- ADD THIS so Enter works after a mouse click
+                                $breadcrumbMode = true;
                             }}
-                            on:dblclick={() => {
-                                const cat = filter.category;
-                                pickerInitialValue = filter.value; // Capture value
-                                pickerEditIndex = i; // Capture index
-                                popFilter(i);
-                                $breadcrumbIndex = -1;
-                                $activePicker = cat;
+                            on:keydown={(e) => {
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    editBreadcrumb(i);
+                                }
                             }}
+                            on:dblclick={() => editBreadcrumb(i)}
                         >
                             <span class="breadcrumb-label"
                                 >{filter.category}:</span
