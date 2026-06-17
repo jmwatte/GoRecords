@@ -116,7 +116,7 @@
                             playMarked();
                             break;
                         case 1:
-                            showMarkActions = false;
+                            addMarkedToQueue();
                             break;
                         case 2:
                             showMarkActions = false;
@@ -167,6 +167,23 @@
     // Track list — populated via Wails binding when album is opened
     let tracks = [];
     let loadingTracks = false;
+
+    // Queue — separate track list for the queue view
+    let queueTracks = [];
+    let nowPlayingIsQueue = false;
+
+    function toggleQueue() {
+        if ($currentView === "queue") {
+            $currentView = savedViewBeforeQueue || "crate";
+            savedViewBeforeQueue = null;
+        } else {
+            savedViewBeforeQueue = $currentView;
+            $currentView = "queue";
+        }
+        $currentIndex = 0;
+    }
+
+    let savedViewBeforeQueue = null;
 
     // Cached index to restore on Escape
     let crateIndexSnapshot = 0;
@@ -226,8 +243,38 @@
             showToast("No albums in marks to play", "warn");
             return;
         }
-        tracks = allTracks;
-        playTrack(0);
+        // Switch to queue view and start playing from queue
+        queueTracks = allTracks;
+        if ($currentView !== "queue") {
+            savedViewBeforeQueue = $currentView;
+            $currentView = "queue";
+        }
+        $currentIndex = 0;
+        playQueueTrack(0);
+    }
+
+    // Add marked albums to the queue
+    async function addMarkedToQueue() {
+        showMarkActions = false;
+        let added = 0;
+        for (const item of $markedItems) {
+            if (item.type === "track") {
+                continue;
+            } else if (item.type === "album") {
+                const albumTracks = await GetAlbumTracks(item.id);
+                queueTracks = [...queueTracks, ...albumTracks];
+                added += albumTracks.length;
+            }
+        }
+        if (added === 0) {
+            showToast("No albums in marks to add", "warn");
+        } else {
+            showToast(
+                `Added ${added} track${added !== 1 ? "s" : ""} to queue`,
+                "info",
+                2000,
+            );
+        }
     }
 
     // Fetch albums and facets from the backend
@@ -311,6 +358,8 @@
     }
 
     function handleAction(action) {
+        // Suppress all actions when a popup overlay is open
+        if (showMarkActions || $activePicker) return;
         // Global shortcuts (work in any view)
         switch (action) {
             case "toggle_mark":
@@ -372,28 +421,7 @@
                     handleCloseAlbum();
                     break;
                 case "open_album":
-                    if (
-                        $breadcrumbMode &&
-                        $breadcrumbIndex >= 0 &&
-                        $breadcrumbIndex < $filterStack.length
-                    ) {
-                        const cat = $filterStack[$breadcrumbIndex].category;
-
-                        // Capture the current state for the picker
-                        pickerInitialValue =
-                            $filterStack[$breadcrumbIndex].value;
-                        pickerEditIndex = $breadcrumbIndex;
-
-                        popFilter($breadcrumbIndex);
-                        $breadcrumbIndex = -1;
-                        $breadcrumbMode = false;
-                        $activePicker = cat;
-                    } else if (albums[$currentIndex]) {
-                        pickerInitialValue = "";
-                        pickerEditIndex = -1;
-                        handleOpenAlbum(albums[$currentIndex].albumFolder);
-                        $breadcrumbMode = false;
-                    }
+                    handlePlaySelected();
                     break;
             }
             return;
@@ -524,6 +552,9 @@
                 $currentView =
                     $currentView === "settings" ? "crate" : "settings";
                 break;
+            case "toggle_queue":
+                toggleQueue();
+                break;
             case "random_album":
                 handleRandomAlbum();
                 break;
@@ -606,6 +637,7 @@
     // Play the track at the given index in the current tracks list
     function playTrack(idx) {
         if (!tracks[idx]) return;
+        nowPlayingIsQueue = false;
         if ($isAlbumTracksView) {
             $currentIndex = idx;
         }
@@ -631,9 +663,43 @@
         }
     }
 
-    // Play selected track on Enter in album_tracks view
+    // Play a track from the queue
+    function playQueueTrack(idx) {
+        if (!queueTracks[idx]) return;
+        nowPlayingIsQueue = true;
+        nowPlayingIndex = idx;
+        $currentIndex = idx;
+        const track = queueTracks[idx];
+        if (track.path && audioEl) {
+            currentTrackPath = track.path;
+            nowPlaying = {
+                title: track.title,
+                artist: track.artist,
+                albumArtist: track.albumArtist,
+                coverPath: track.coverPath,
+            };
+            audioEl.src = audioSrc(track.path);
+            audioEl.play().catch((err) => {
+                if (err.name === "AbortError") return;
+                console.error("Playback failed:", err);
+                showToast("Playback failed for this track", "warn");
+            });
+            isPlaying = true;
+            updateMediaSession(track);
+        }
+    }
+
+    // Play selected track on Enter in album_tracks or queue view
     function handlePlaySelected() {
-        if (
+        if ($currentView === "queue") {
+            if (
+                queueTracks.length > 0 &&
+                $currentIndex >= 0 &&
+                $currentIndex < queueTracks.length
+            ) {
+                playQueueTrack($currentIndex);
+            }
+        } else if (
             $isAlbumTracksView &&
             tracks.length > 0 &&
             $currentIndex >= 0 &&
@@ -645,9 +711,14 @@
 
     // Auto-advance to next track when current one ends
     function onTrackEnded() {
+        const list = nowPlayingIsQueue ? queueTracks : tracks;
         const next = nowPlayingIndex + 1;
-        if (tracks.length > 0 && next < tracks.length) {
-            playTrack(next);
+        if (list.length > 0 && next < list.length) {
+            if (nowPlayingIsQueue) {
+                playQueueTrack(next);
+            } else {
+                playTrack(next);
+            }
         } else {
             isPlaying = false;
         }
@@ -667,14 +738,28 @@
 
     function prevTrack() {
         if (nowPlayingIndex < 0) return;
+        const list = nowPlayingIsQueue ? queueTracks : tracks;
         const prev = nowPlayingIndex - 1;
-        if (prev >= 0) playTrack(prev);
+        if (prev >= 0) {
+            if (nowPlayingIsQueue) {
+                playQueueTrack(prev);
+            } else {
+                playTrack(prev);
+            }
+        }
     }
 
     function nextTrack() {
         if (nowPlayingIndex < 0) return;
+        const list = nowPlayingIsQueue ? queueTracks : tracks;
         const next = nowPlayingIndex + 1;
-        if (next < tracks.length) playTrack(next);
+        if (next < list.length) {
+            if (nowPlayingIsQueue) {
+                playQueueTrack(next);
+            } else {
+                playTrack(next);
+            }
+        }
     }
 
     function toggleMute() {
@@ -751,13 +836,27 @@
         });
         navigator.mediaSession.setActionHandler("previoustrack", () => {
             if (nowPlayingIndex < 0) return;
+            const list = nowPlayingIsQueue ? queueTracks : tracks;
             const prev = nowPlayingIndex - 1;
-            if (prev >= 0) playTrack(prev);
+            if (prev >= 0) {
+                if (nowPlayingIsQueue) {
+                    playQueueTrack(prev);
+                } else {
+                    playTrack(prev);
+                }
+            }
         });
         navigator.mediaSession.setActionHandler("nexttrack", () => {
             if (nowPlayingIndex < 0) return;
+            const list = nowPlayingIsQueue ? queueTracks : tracks;
             const next = nowPlayingIndex + 1;
-            if (next < tracks.length) playTrack(next);
+            if (next < list.length) {
+                if (nowPlayingIsQueue) {
+                    playQueueTrack(next);
+                } else {
+                    playTrack(next);
+                }
+            }
         });
     }
 </script>
@@ -973,6 +1072,51 @@
                 </div>
             {/if}
         </div>
+    {:else if $currentView === "queue"}
+        <div class="album-tracks-view">
+            <button class="back-btn" on:click={toggleQueue}
+                >← Back to Crate</button
+            >
+            <h2 class="tracks-album-title">
+                Queue
+                <span class="tracks-count"
+                    >· {queueTracks.length} track{queueTracks.length !== 1
+                        ? "s"
+                        : ""}</span
+                >
+            </h2>
+
+            {#if queueTracks.length === 0}
+                <div class="loading">Queue is empty.</div>
+            {:else}
+                <div class="tracks-header">
+                    <span class="col-track">#</span>
+                    <span class="col-title">Title</span>
+                    <span class="col-artist">Artist</span>
+                    <span class="col-duration">Time</span>
+                </div>
+                <div class="tracks-body" bind:this={tracksBodyEl}>
+                    {#each queueTracks as track, i}
+                        <div
+                            class="track-row"
+                            class:selected={i === $currentIndex}
+                            on:click={() => playQueueTrack(i)}
+                            on:dblclick={() => playQueueTrack(i)}
+                        >
+                            <span class="col-track">{i + 1}</span>
+                            <span class="col-title"
+                                >{track.title ||
+                                    track.path?.split(/[\\/]/).pop()}</span
+                            >
+                            <span class="col-artist">{track.artist}</span>
+                            <span class="col-duration"
+                                >{fmtDuration(track.duration)}</span
+                            >
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
     {:else if $currentView === "settings"}
         <Settings />
     {/if}
@@ -1045,9 +1189,7 @@
                     <button
                         class="picker-item"
                         class:picker-highlight={markActionIdx === 1}
-                        on:click={() => {
-                            showMarkActions = false;
-                        }}
+                        on:click={addMarkedToQueue}
                         on:mouseenter={() => (markActionIdx = 1)}
                     >
                         <span class="picker-item-value">Add to Queue</span>
