@@ -221,6 +221,13 @@ func ExtractTags(filePath string) (*models.Track, error) {
 	}
 	track.AlbumFolder = albumFolder
 
+	// Record when the album folder was last modified (for "newest" sorting)
+	if fi, err := os.Stat(albumFolder); err == nil {
+		track.DateAdded = fi.ModTime()
+	} else {
+		track.DateAdded = time.Now()
+	}
+
 	// Duration logic
 	// Note: durationFromTags expects tag.Metadata. If we only have fallback, it will return 0,
 	// which is fine because the next line will use the decoder.

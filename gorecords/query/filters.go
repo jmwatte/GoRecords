@@ -113,6 +113,7 @@ func CountFacets(db *gorm.DB, field string, filters []Filter) ([]Facet, error) {
 func safeColumn(name string) string {
 	allowed := map[string]bool{
 		"id":           true,
+		"date_added":   true,
 		"path":         true,
 		"title":        true,
 		"artist":       true,
@@ -202,6 +203,7 @@ func GenerateFacets(db *gorm.DB, fields []string, filters []Filter) (map[string]
 // AlbumResult represents a single aggregated album row from the query.
 type AlbumResult struct {
 	AlbumFolder   string  `json:"albumFolder"`
+	DateAdded     string  `json:"dateAdded"`
 	Album         string  `json:"album"`
 	AlbumArtist   string  `json:"albumArtist"`
 	CoverPath     string  `json:"coverPath"`
@@ -292,6 +294,7 @@ func BuildAlbumQuery(db *gorm.DB, q AlbumQuery) *gorm.DB {
 		Table("tracks").
 		Select(strings.Join([]string{
 			"album_folder",
+			"MAX(date_added) AS date_added",
 			"MAX(album) AS album",
 			"MAX(album_artist) AS album_artist",
 			"MAX(cover_path) AS cover_path",

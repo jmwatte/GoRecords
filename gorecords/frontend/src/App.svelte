@@ -58,7 +58,12 @@
 
     // Category picker state
     let catIdx = 0;
-    const CATS = ["genre", "year", "artist"];
+    let catPickerBody;
+    const CATS = ["genre", "year", "album_artist"];
+    $: if (catPickerBody && CATS.length > 0 && catIdx >= 0) {
+        const el = catPickerBody.querySelector(".picker-highlight");
+        if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
     // Reset highlight when category picker opens
     $: if ($activePicker === "add") catIdx = 0;
 
@@ -148,23 +153,39 @@
         };
     });
 
+    // Current sort state — persisted across refreshes
+    let currentSortBy = "album";
+    let currentSortDir = "ASC";
+
     // Fetch albums and facets from the backend
     async function refreshData() {
         loadingAlbums = true;
         const payload = filtersToPayload($filterStack);
         try {
             const [albumResult, facetResult] = await Promise.all([
-                GetFilteredAlbums(payload, 0, 1000),
+                GetFilteredAlbums(
+                    payload,
+                    0,
+                    1000,
+                    currentSortBy,
+                    currentSortDir,
+                ),
                 GetFacets(payload),
             ]);
             albums = albumResult.albums || [];
-            totalAlbums = albumResult.total || albums.length;
+            const newTotal = albumResult.total || albums.length;
+            totalAlbums = newTotal;
             facetData.set(facetResult || {});
+            // Keep album selection in bounds
+            if ($currentIndex >= newTotal) {
+                $currentIndex = Math.max(0, newTotal - 1);
+            }
         } catch (err) {
             console.error("Failed to load data:", err);
             showToast("Failed to load data", "error");
             albums = [];
             totalAlbums = 0;
+            $currentIndex = 0;
         } finally {
             loadingAlbums = false;
         }
@@ -280,7 +301,9 @@
 
         // Crate-level navigation
 
-        // toggle_picker, breadcrumb_mode, delete_filter must work even when picker is open
+        // Crate-level navigation
+
+        // toggle_picker, breadcrumb_mode, edit_breadcrumb, delete_filter work even when picker is open
         if (action === "toggle_picker") {
             if ($activePicker) {
                 activePicker.set(null);
@@ -300,6 +323,35 @@
             }
             return;
         }
+        if (action === "edit_breadcrumb") {
+            if (
+                $breadcrumbIndex >= 0 &&
+                $breadcrumbIndex < $filterStack.length
+            ) {
+                editBreadcrumb($breadcrumbIndex);
+                //refreshData();
+            }
+            return;
+        }
+        // Sort actions
+        const sorts = {
+            sort_album: ["album", "ASC"],
+            sort_artist: ["album_artist", "ASC"],
+            sort_date_added: ["date_added", "DESC"],
+            sort_year: ["year", "DESC"],
+        };
+        if (sorts[action]) {
+            currentSortBy = sorts[action][0];
+            currentSortDir = sorts[action][1];
+            refreshData();
+            return;
+        }
+        if (action === "toggle_sort_dir") {
+            currentSortDir = currentSortDir === "ASC" ? "DESC" : "ASC";
+            refreshData();
+            return;
+        }
+
         if (action === "delete_filter") {
             if (
                 $breadcrumbIndex >= 0 &&
@@ -308,7 +360,7 @@
                 const idx = $breadcrumbIndex;
                 const oldLen = $filterStack.length;
                 popFilter(idx);
-                // Move highlight to the previous chip, or stay at same index
+                refreshData();
                 const newLen = oldLen - 1;
                 if (newLen === 0) {
                     $breadcrumbIndex = -1;
@@ -320,7 +372,6 @@
             return;
         }
 
-        // Skip other crate navigation when a picker is open (picker handles its own keys)
         if ($activePicker) return;
 
         switch (action) {
@@ -335,28 +386,14 @@
                 $breadcrumbMode = false;
                 break;
             case "open_album":
-                if (
-                    $breadcrumbIndex >= 0 &&
-                    $breadcrumbIndex < $filterStack.length
-                ) {
-                    // Only run if no breadcrumb button has focus
-                    // (a focused button's on:keydown handles its own Enter)
-                    if (
-                        !document.activeElement?.classList?.contains(
-                            "breadcrumb-chip",
-                        )
-                    ) {
-                        editBreadcrumb($breadcrumbIndex);
-                    }
-                } else if (albums[$currentIndex]) {
+                if (albums[$currentIndex]) {
                     pickerInitialValue = "";
                     pickerEditIndex = -1;
                     handleOpenAlbum(albums[$currentIndex].albumFolder);
                     $breadcrumbMode = false;
                 }
                 break;
-            // Arrow keys in breadcrumb mode: navigate crumbs
-            case "go_back": // ArrowLeft
+            case "go_back":
                 if ($breadcrumbMode && $filterStack.length > 0) {
                     $breadcrumbIndex = Math.max(
                         0,
@@ -366,7 +403,7 @@
                     );
                 }
                 break;
-            case "enter_album": // ArrowRight
+            case "enter_album":
                 if ($breadcrumbMode && $filterStack.length > 0) {
                     $breadcrumbIndex = Math.min(
                         $filterStack.length - 1,
@@ -625,18 +662,12 @@
                     class:breadcrumb-mode-active={$breadcrumbMode}
                 >
                     {#each $filterStack as filter, i}
-                        <button
+                        <div
                             class="breadcrumb-chip"
                             class:breadcrumb-active={i === $breadcrumbIndex}
                             on:click={() => {
                                 $breadcrumbIndex = i;
                                 $breadcrumbMode = true;
-                            }}
-                            on:keydown={(e) => {
-                                if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    editBreadcrumb(i);
-                                }
                             }}
                             on:dblclick={() => editBreadcrumb(i)}
                         >
@@ -649,7 +680,7 @@
                                 on:click|stopPropagation={() => popFilter(i)}
                                 >✕</span
                             >
-                        </button>
+                        </div>
                     {/each}
                     <button
                         class="breadcrumb-add"
@@ -716,7 +747,20 @@
                             <span class="col-album">Album</span>
                             <span class="col-year">Year</span>
                             <span class="col-genre">Genre</span>
+                            <span class="col-date">Added</span>
                             <span class="col-tracks">Tracks</span>
+                            <span class="col-sort">
+                                {currentSortBy === "date_added"
+                                    ? "Date"
+                                    : currentSortBy === "album_artist"
+                                      ? "Artist"
+                                      : currentSortBy}{" "}
+                                <span class="sort-arrow"
+                                    >{currentSortDir === "ASC"
+                                        ? "\u25B2"
+                                        : "\u25BC"}</span
+                                >
+                            </span>
                         </div>
                         <div class="ledger-body">
                             {#each albums as album, i}
@@ -734,6 +778,13 @@
                                     <span class="col-album">{album.album}</span>
                                     <span class="col-year">{album.year}</span>
                                     <span class="col-genre">{album.genre}</span>
+                                    <span class="col-date">
+                                        {album.dateAdded
+                                            ? new Date(
+                                                  album.dateAdded,
+                                              ).toLocaleDateString()
+                                            : "—"}
+                                    </span>
                                     <span class="col-tracks"
                                         >{album.trackCount}</span
                                     >
@@ -816,7 +867,7 @@
                         on:click={() => activePicker.set(null)}>✕</button
                     >
                 </div>
-                <div class="picker-body">
+                <div class="picker-body" bind:this={catPickerBody}>
                     {#each CATS as cat, i}
                         <button
                             class="picker-item"
@@ -824,9 +875,10 @@
                             on:click={() => ($activePicker = cat)}
                             on:mouseenter={() => (catIdx = i)}
                         >
-                            <span
-                                class="picker-item-value"
-                                style="text-transform:capitalize">{cat}</span
+                            <span class="picker-item-value"
+                                >{cat === "album_artist"
+                                    ? "Album Artist"
+                                    : cat}</span
                             >
                         </button>
                     {/each}
@@ -852,6 +904,7 @@
                     pushFilter($activePicker, value);
                 }
                 activePicker.set(null);
+                refreshData();
             }}
         />
     {/if}
@@ -1090,9 +1143,25 @@
     .col-genre {
         flex: 1;
     }
+    .col-date {
+        flex: 0 0 90px;
+        color: rgba(255, 255, 255, 0.5);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.8rem;
+    }
     .col-tracks {
         flex: 0 0 60px;
         text-align: right;
+    }
+    .col-sort {
+        flex: 0 0 80px;
+        text-align: right;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 0.75rem;
+        letter-spacing: 0.05em;
+    }
+    .sort-arrow {
+        font-size: 0.6rem;
     }
 
     /* ===== Album Tracks View ===== */

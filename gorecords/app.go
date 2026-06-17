@@ -91,17 +91,28 @@ func (a *App) PickFolder(defaultDirectory string) string {
 // GetAlbums returns all unique albums (grouped by album_folder) from the
 // database, with aggregated metadata. Pass an offset and limit for pagination.
 func (a *App) GetAlbums(offset, limit int) *query.PaginatedAlbums {
-	return a.GetFilteredAlbums("[]", offset, limit)
+	return a.GetFilteredAlbums("[]", offset, limit, "", "")
 }
 
 // GetFilteredAlbums returns paginated albums matching the given filters.
 // filtersJSON is a JSON array of { field, op, value } objects.
-func (a *App) GetFilteredAlbums(filtersJSON string, offset, limit int) *query.PaginatedAlbums {
+// sortBy and sortDir control the ordering (e.g. "album", "date_added", "year").
+// Pass "" for defaults (album ASC).
+func (a *App) GetFilteredAlbums(filtersJSON string, offset, limit int, sortBy, sortDir string) *query.PaginatedAlbums {
 	filters := parseFiltersJSON(filtersJSON)
+
+	if sortBy == "" {
+		sortBy = "album"
+	}
+	dir := query.SortAsc
+	if sortDir == "DESC" {
+		dir = query.SortDesc
+	}
+
 	q := query.AlbumQuery{
 		Filters: filters,
-		SortBy:  "album",
-		SortDir: query.SortAsc,
+		SortBy:  sortBy,
+		SortDir: dir,
 		Offset:  offset,
 		Limit:   limit,
 	}
@@ -119,7 +130,7 @@ func (a *App) GetFilteredAlbums(filtersJSON string, offset, limit int) *query.Pa
 // filtersJSON is a JSON array of { field, op, value } objects.
 func (a *App) GetFacets(filtersJSON string) map[string][]query.Facet {
 	filters := parseFiltersJSON(filtersJSON)
-	fields := []string{"genre", "year", "artist"}
+	fields := []string{"genre", "year", "album_artist"}
 	result, err := query.GenerateFacets(DB, fields, filters)
 	if err != nil {
 		slog.Error("failed to get facets", "error", err)
