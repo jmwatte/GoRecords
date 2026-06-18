@@ -80,6 +80,17 @@ func (a *App) OpenFolder(path string) error {
 	return cmd.Start()
 }
 
+// ReScanMarked rescans the given file/album paths and updates the database.
+// paths is a JSON array of absolute file or directory paths to rescan.
+func (a *App) ReScanMarked(pathsJSON string) (int, error) {
+	var paths []string
+	if err := json.Unmarshal([]byte(pathsJSON), &paths); err != nil {
+		slog.Warn("rescan marked: invalid paths JSON", "error", err)
+		return 0, err
+	}
+	return scanner.RescanMarked(DB, paths)
+}
+
 // PickFolder opens the native OS directory picker dialog and returns the
 // selected path, or an empty string if the user cancelled.
 // The defaultDirectory parameter sets the initial folder shown in the dialog.

@@ -32,6 +32,7 @@
         GetFilteredAlbums,
         GetFacets,
         OpenFolder,
+        ReScanMarked,
     } from "../wailsjs/go/main/App.js";
     import Settings from "./lib/Settings.svelte";
     import FilterPicker from "./lib/FilterPicker.svelte";
@@ -107,7 +108,7 @@
                     break;
                 case "ArrowDown":
                     e.preventDefault();
-                    markActionIdx = Math.min(3, markActionIdx + 1);
+                    markActionIdx = Math.min(4, markActionIdx + 1);
                     break;
                 case "Enter":
                     e.preventDefault();
@@ -124,6 +125,9 @@
                         case 3:
                             clearMarks();
                             showMarkActions = false;
+                            break;
+                        case 4:
+                            rescanMarked();
                             break;
                     }
                     break;
@@ -274,6 +278,28 @@
                 "info",
                 2000,
             );
+        }
+    }
+
+    // Rescan marked files/albums
+    async function rescanMarked() {
+        showMarkActions = false;
+        const paths = $markedItems.map((item) => item.id);
+        if (paths.length === 0) {
+            showToast("Nothing marked to rescan", "warn");
+            return;
+        }
+        try {
+            const updated = await ReScanMarked(JSON.stringify(paths));
+            showToast(
+                `Rescanned ${updated} track${updated !== 1 ? "s" : ""}`,
+                "info",
+                3000,
+            );
+            refreshData();
+        } catch (err) {
+            console.error("Rescan failed:", err);
+            showToast("Rescan failed", "error");
         }
     }
 
@@ -1217,6 +1243,14 @@
                             class="picker-item-value"
                             style="color:rgba(255,80,80,0.8)">Clear Marks</span
                         >
+                    </button>
+                    <button
+                        class="picker-item"
+                        class:picker-highlight={markActionIdx === 4}
+                        on:click={rescanMarked}
+                        on:mouseenter={() => (markActionIdx = 4)}
+                    >
+                        <span class="picker-item-value">Rescan Selected</span>
                     </button>
                 </div>
             </div>

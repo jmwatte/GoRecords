@@ -19,4 +19,6 @@ export function OpenFolder(arg1:string):Promise<void>;
 
 export function PickFolder(arg1:string):Promise<string>;
 
+export function ReScanMarked(arg1:string):Promise<number>;
+
 export function ScanMusic(arg1:string):Promise<void>;

@@ -34,6 +34,10 @@ export function PickFolder(arg1) {
   return window['go']['main']['App']['PickFolder'](arg1);
 }
 
+export function ReScanMarked(arg1) {
+  return window['go']['main']['App']['ReScanMarked'](arg1);
+}
+
 export function ScanMusic(arg1) {
   return window['go']['main']['App']['ScanMusic'](arg1);
 }
